@@ -263,14 +263,13 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       if (channel.key1.length() > 0) {
         // 飞书使用秒级时间戳
         int64_t ts = time(nullptr);
-        // 飞书签名: base64(hmac-sha256(timestamp + "\n" + secret, secret))
+        // 飞书签名: base64(HMAC-SHA256(key=timestamp + "\n" + secret, msg=""))
         String stringToSign = String(ts) + "\n" + channel.key1;
         uint8_t hmacResult[32];
         mbedtls_md_context_t ctx;
         mbedtls_md_init(&ctx);
         mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
-        mbedtls_md_hmac_starts(&ctx, (const unsigned char*)channel.key1.c_str(), channel.key1.length());
-        mbedtls_md_hmac_update(&ctx, (const unsigned char*)stringToSign.c_str(), stringToSign.length());
+        mbedtls_md_hmac_starts(&ctx, (const unsigned char*)stringToSign.c_str(), stringToSign.length());
         mbedtls_md_hmac_finish(&ctx, hmacResult);
         mbedtls_md_free(&ctx);
         String sign = base64::encode(hmacResult, 32);
