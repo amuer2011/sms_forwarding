@@ -116,6 +116,8 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
   if (needUrl && channel.url.length() == 0) return;
   
   HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(8000);
   String channelName = channel.name.length() > 0 ? channel.name : ("通道" + String(channel.type));
   logCaptureLn(String("发送到推送通道: " + channelName));
   
@@ -123,6 +125,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
   String senderEscaped = jsonEscape(String(sender));
   String messageEscaped = jsonEscape(String(message));
   String timestampEscaped = jsonEscape(String(timestamp));
+  String iconEscaped = jsonEscape(config.notificationIcon.length() > 0 ? config.notificationIcon : String("📱"));
   
   switch (channel.type) {
     case PUSH_TYPE_POST_JSON: {
@@ -192,7 +195,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       http.begin(webhookUrl);
       http.addHeader("Content-Type", "application/json");
       String jsonData = "{\"msgtype\":\"text\",\"text\":{\"content\":\"";
-      jsonData += "📱短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
+      jsonData += iconEscaped + "短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
       jsonData += "\"}}";
       logCaptureLn(String("钉钉: " + jsonData));
       httpCode = http.POST(jsonData);
@@ -281,7 +284,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       // 飞书消息体
       jsonData += "\"msg_type\":\"text\",";
       jsonData += "\"content\":{\"text\":\"";
-      jsonData += "📱短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
+      jsonData += iconEscaped + "短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
       jsonData += "\"}}";
       
       http.begin(webhookUrl);
@@ -322,7 +325,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       
       String jsonData = "{";
       jsonData += "\"chat_id\":\"" + channel.key1 + "\",";
-      String text = "📱短信通知\n发送者: " + senderEscaped + "\n内容: " + messageEscaped + "\n时间: " + timestampEscaped;
+      String text = iconEscaped + "短信通知\n发送者: " + senderEscaped + "\n内容: " + messageEscaped + "\n时间: " + timestampEscaped;
       jsonData += "\"text\":\"" + text + "\"";
       jsonData += "}";
       

@@ -92,6 +92,12 @@ void handleRoot() {
   html.replace("%SMTP_SEND_TO%", config.smtpSendTo);
   html.replace("%ADMIN_PHONE%", config.adminPhone);
   html.replace("%NUMBER_BLACK_LIST%", config.numberBlackList);
+  String notificationIconHtml = config.notificationIcon;
+  notificationIconHtml.replace("&", "&amp;");
+  notificationIconHtml.replace("\"", "&quot;");
+  notificationIconHtml.replace("<", "&lt;");
+  notificationIconHtml.replace(">", "&gt;");
+  html.replace("%NOTIFICATION_ICON%", notificationIconHtml);
 
   // 概览页面的配置状态
   bool emailOk = config.smtpServer.length() > 0 && config.smtpUser.length() > 0 &&
@@ -884,6 +890,11 @@ void handleSave() {
   }
   if (server.hasArg("numberBlackList")) {
     config.numberBlackList = server.arg("numberBlackList");
+  }
+  if (server.hasArg("notificationIcon")) {
+    config.notificationIcon = server.arg("notificationIcon");
+    config.notificationIcon.trim();
+    if (config.notificationIcon.length() == 0) config.notificationIcon = "📱";
   }
 
   // 推送通道配置：只在对应通道的字段存在时更新

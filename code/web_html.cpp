@@ -93,6 +93,7 @@ const char* htmlPage = R"rawliteral(
     .form-warning { font-size: 11px; color: #ab570a; background: var(--warning-soft); padding: 9px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; line-height: 1.5; }
     .form-row { display: flex; gap: 14px; }
     .form-row .form-group { flex: 1; }
+    .icon-picker { display: grid; grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.2fr); gap: 14px; }
 
     /* Buttons */
     .btn {
@@ -183,6 +184,7 @@ const char* htmlPage = R"rawliteral(
       .main { margin-left: 50px; padding: 18px 14px; }
       :root { --sidebar-w: 50px; }
       .overview-grid { grid-template-columns: 1fr; }
+      .icon-picker { grid-template-columns: 1fr; gap: 8px; }
     }
   </style>
 </head>
@@ -293,6 +295,32 @@ const char* htmlPage = R"rawliteral(
       <div class="card">
         <div class="card-header">🔗 通道配置</div>
         <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">通知图标 / 设备标识</label>
+            <div class="icon-picker">
+              <select class="form-select" id="notificationIconPreset" onchange="applyNotificationIconPreset()">
+                <option value="">自定义...</option>
+                <option value="📱">📱 手机</option>
+                <option value="📟">📟 呼机</option>
+                <option value="🏠">🏠 家庭</option>
+                <option value="🏢">🏢 办公室</option>
+                <option value="🏭">🏭 工厂</option>
+                <option value="🚗">🚗 车辆</option>
+                <option value="📡">📡 基站</option>
+                <option value="📶">📶 网络</option>
+                <option value="🔔">🔔 通知</option>
+                <option value="🚨">🚨 告警</option>
+                <option value="🛡️">🛡️ 安防</option>
+                <option value="💡">💡 智能设备</option>
+                <option value="⚙️">⚙️ 控制器</option>
+                <option value="📬">📬 收件箱</option>
+                <option value="1️⃣">1️⃣ 设备 1</option>
+                <option value="2️⃣">2️⃣ 设备 2</option>
+              </select>
+              <input class="form-input" type="text" id="notificationIcon" name="notificationIcon" value="%NOTIFICATION_ICON%" maxlength="16" placeholder="输入文字或图标" oninput="syncNotificationIconPreset()">
+            </div>
+            <p class="form-hint">选择常用标识，或在右侧输入自定义文字、Emoji。</p>
+          </div>
           %PUSH_CHANNELS%
         </div>
       </div>
@@ -461,6 +489,25 @@ const char* htmlPage = R"rawliteral(
       var cb = document.getElementById('push' + idx + 'en');
       if (cb.checked) ch.classList.add('enabled'); else ch.classList.remove('enabled');
     }
+    function applyNotificationIconPreset() {
+      var preset = document.getElementById('notificationIconPreset');
+      var input = document.getElementById('notificationIcon');
+      if (preset.value) input.value = preset.value;
+      else input.focus();
+    }
+    function syncNotificationIconPreset() {
+      var preset = document.getElementById('notificationIconPreset');
+      var inputValue = document.getElementById('notificationIcon').value;
+      var matched = false;
+      for (var i = 0; i < preset.options.length; i++) {
+        if (preset.options[i].value && preset.options[i].value === inputValue) {
+          preset.selectedIndex = i;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) preset.selectedIndex = 0;
+    }
     function updateTypeHint(idx) {
       var sel = document.getElementById('push' + idx + 'type');
       var hint = document.getElementById('hint' + idx);
@@ -487,6 +534,7 @@ const char* htmlPage = R"rawliteral(
     }
     document.addEventListener('DOMContentLoaded', function() {
       for (var i = 0; i < 5; i++) { toggleChannel(i); updateTypeHint(i); }
+      syncNotificationIconPreset();
     });
 
     // ---- Send SMS ----

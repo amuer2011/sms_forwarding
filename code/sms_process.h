@@ -4,6 +4,8 @@
 #include "globals.h"
 
 void initConcatBuffer();
+void initPendingSmsQueue();
+void processPendingSmsQueue();
 int findOrCreateConcatSlot(int refNumber, const char* sender, int totalParts);
 String assembleConcatSms(int slot);
 void clearConcatSlot(int slot);

@@ -13,6 +13,7 @@ void saveConfig() {
   preferences.putString("webUser", config.webUser);
   preferences.putString("webPass", config.webPass);
   preferences.putString("numBlkList", config.numberBlackList);
+  preferences.putString("notifyIcon", config.notificationIcon);
   
   // 保存推送通道配置
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
@@ -42,6 +43,8 @@ void loadConfig() {
   config.webUser = preferences.getString("webUser", DEFAULT_WEB_USER);
   config.webPass = preferences.getString("webPass", DEFAULT_WEB_PASS);
   config.numberBlackList = preferences.getString("numBlkList", "");
+  config.notificationIcon = preferences.getString("notifyIcon", "📱");
+  if (config.notificationIcon.length() == 0) config.notificationIcon = "📱";
   
   // 加载推送通道配置
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {

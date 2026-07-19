@@ -9,11 +9,13 @@
 #include "web_handlers.h"
 #include "sms_process.h"
 #include "web_handlers.h"
+#include "wifi_health.h"
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
   Serial.begin(115200);
+  logCaptureF("ESP32复位原因: %d\n", (int)esp_reset_reason());
   // 缩短初始化延时，WiFi连接会处理自己的超时
   delay(200);
   Serial1.begin(115200, SERIAL_8N1, RXD, TXD);
@@ -23,9 +25,11 @@ void setup() {
   while (Serial1.available()) Serial1.read();
   initConcatBuffer();
   loadConfig();
+  initPendingSmsQueue();
   configValid = isConfigValid();
 
   // ---- WiFi 连接优化 ----
+  initWifiHealth();
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);                    // 关闭 Modem Sleep，提高连接响应速度
   WiFi.setAutoReconnect(true);             // 断线后自动重连
@@ -106,6 +110,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  serviceWifiHealth();
   if (!configValid) {
     if (millis() - lastPrintTime >= 1000) {
       lastPrintTime = millis();
@@ -113,6 +118,7 @@ void loop() {
     }
   }
   checkConcatTimeout();
+  processPendingSmsQueue();
   if (Serial.available()) Serial1.write(Serial.read());
   checkSerial1URC();
 }

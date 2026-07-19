@@ -5,6 +5,110 @@
 #include "push.h"
 #include "web_handlers.h"
 
+namespace {
+constexpr uint8_t MAX_PENDING_SMS = 3;
+constexpr unsigned long PENDING_RETRY_INTERVAL_MS = 5000;
+
+struct PendingSms {
+  String sender;
+  String text;
+  String timestamp;
+};
+
+PendingSms pendingSms[MAX_PENDING_SMS];
+uint8_t pendingSmsCount = 0;
+unsigned long lastPendingRetry = 0;
+
+void persistPendingSmsQueue() {
+  Preferences pendingPreferences;
+  if (!pendingPreferences.begin("sms_pending", false)) return;
+
+  pendingPreferences.putUChar("count", pendingSmsCount);
+  for (uint8_t i = 0; i < MAX_PENDING_SMS; i++) {
+    String suffix = String(i);
+    if (i < pendingSmsCount) {
+      pendingPreferences.putString(("sender" + suffix).c_str(), pendingSms[i].sender);
+      pendingPreferences.putString(("text" + suffix).c_str(), pendingSms[i].text);
+      pendingPreferences.putString(("time" + suffix).c_str(), pendingSms[i].timestamp);
+    } else {
+      pendingPreferences.remove(("sender" + suffix).c_str());
+      pendingPreferences.remove(("text" + suffix).c_str());
+      pendingPreferences.remove(("time" + suffix).c_str());
+    }
+  }
+  pendingPreferences.end();
+}
+
+void enqueuePendingSms(const char* sender, const char* text, const char* timestamp) {
+  if (pendingSmsCount == MAX_PENDING_SMS) {
+    for (uint8_t i = 1; i < MAX_PENDING_SMS; i++) pendingSms[i - 1] = pendingSms[i];
+    pendingSmsCount--;
+    logCaptureLn(String("离线短信队列已满，丢弃最早一条"));
+  }
+
+  PendingSms& item = pendingSms[pendingSmsCount++];
+  item.sender = sender;
+  item.text = text;
+  item.timestamp = timestamp;
+  persistPendingSmsQueue();
+  logCaptureF("WiFi离线，短信已入队: %u/%u\n", pendingSmsCount, MAX_PENDING_SMS);
+}
+
+void sendSmsNotifications(const char* sender, const char* text, const char* timestamp) {
+  sendSMSToServer(sender, text, timestamp);
+  String subject = "短信";
+  subject += sender;
+  subject += ",";
+  subject += text;
+  String body = "来自：";
+  body += sender;
+  body += "，时间：";
+  body += timestamp;
+  body += "，内容：";
+  body += text;
+  sendEmailNotification(subject.c_str(), body.c_str());
+}
+}  // namespace
+
+void initPendingSmsQueue() {
+  Preferences pendingPreferences;
+  if (!pendingPreferences.begin("sms_pending", true)) return;
+
+  pendingSmsCount = min((uint8_t)pendingPreferences.getUChar("count", 0), MAX_PENDING_SMS);
+  for (uint8_t i = 0; i < pendingSmsCount; i++) {
+    String suffix = String(i);
+    pendingSms[i].sender = pendingPreferences.getString(("sender" + suffix).c_str(), "");
+    pendingSms[i].text = pendingPreferences.getString(("text" + suffix).c_str(), "");
+    pendingSms[i].timestamp = pendingPreferences.getString(("time" + suffix).c_str(), "");
+  }
+  pendingPreferences.end();
+
+  if (pendingSmsCount > 0) {
+    logCaptureF("已恢复离线短信队列: %u条\n", pendingSmsCount);
+  }
+}
+
+void processPendingSmsQueue() {
+  if (pendingSmsCount == 0 || WiFi.status() != WL_CONNECTED) return;
+
+  unsigned long now = millis();
+  if (now - lastPendingRetry < PENDING_RETRY_INTERVAL_MS) return;
+  lastPendingRetry = now;
+
+  logCaptureF("补发离线短信，剩余: %u条\n", pendingSmsCount);
+  sendSmsNotifications(pendingSms[0].sender.c_str(), pendingSms[0].text.c_str(), pendingSms[0].timestamp.c_str());
+
+  if (WiFi.status() != WL_CONNECTED) {
+    logCaptureLn(String("补发时WiFi再次断开，保留队列"));
+    return;
+  }
+
+  for (uint8_t i = 1; i < pendingSmsCount; i++) pendingSms[i - 1] = pendingSms[i];
+  pendingSmsCount--;
+  pendingSms[pendingSmsCount] = PendingSms();
+  persistPendingSmsQueue();
+}
+
 // 初始化长短信缓存
 void initConcatBuffer() {
   for (int i = 0; i < MAX_CONCAT_MESSAGES; i++) {
@@ -289,12 +393,12 @@ void processSmsContent(const char* sender, const char* text, const char* timesta
     }
   }
 
-  // 发送通知http（推送到所有启用的通道）
-  sendSMSToServer(sender, text, timestamp);
-  // 发送通知邮件
-  String subject = ""; subject+="短信";subject+=sender;subject+=",";subject+=text;
-  String body = ""; body+="来自：";body+=sender;body+="，时间：";body+=timestamp;body+="，内容：";body+=text;
-  sendEmailNotification(subject.c_str(), body.c_str());
+  if (WiFi.status() != WL_CONNECTED) {
+    enqueuePendingSms(sender, text, timestamp);
+    return;
+  }
+
+  sendSmsNotifications(sender, text, timestamp);
 }
 
 // 处理URC和PDU
