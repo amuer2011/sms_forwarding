@@ -111,9 +111,9 @@ void modemInit() {
     String version = "未知";
     
     // 按行解析
-    int lineStart = 0;
+    unsigned int lineStart = 0;
     int lineNum = 0;
-    for (int i = 0; i < resp.length(); i++) {
+    for (unsigned int i = 0; i < resp.length(); i++) {
       if (resp.charAt(i) == '\n' || i == resp.length() - 1) {
         String line = resp.substring(lineStart, i);
         line.trim();
@@ -211,6 +211,10 @@ bool sendSMS(const char* phoneNumber, const char* message) {
       if (c == '>') {
         gotPrompt = true;
         break;
+      }
+      String line;
+      if (feedModemInputChar(c, &line) && line.length() > 0) {
+        processModemUrcLine(line);
       }
     }
     delay(1);

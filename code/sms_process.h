@@ -16,6 +16,7 @@ bool readSerialLineLimited(HardwareSerial& port,
                            String* result,
                            uint16_t maxBytes,
                            CopsScanParser* scanParser = nullptr);
+bool feedModemInputChar(char value, String* completedLine);
 bool isHexString(const String& str);
 bool isInNumberBlackList(const char* sender);
 bool isAdmin(const char* sender);

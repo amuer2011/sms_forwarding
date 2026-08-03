@@ -245,13 +245,19 @@ bool readSerialLineLimited(HardwareSerial& port,
     char value = static_cast<char>(port.read());
     bytesRead++;
     if (scanParser != nullptr) feedCopsScanParser(scanParser, value);
-    if (!feedModemLineAssembler(&modemLineAssembler, value)) continue;
-
-    *result = String(modemLineAssembler.buffer);
-    resetModemLineAssembler(&modemLineAssembler);
-    return true;
+    if (feedModemInputChar(value, result)) return true;
   }
   return false;
+}
+
+bool feedModemInputChar(char value, String* completedLine) {
+  if (completedLine == nullptr ||
+      !feedModemLineAssembler(&modemLineAssembler, value)) {
+    return false;
+  }
+  *completedLine = String(modemLineAssembler.buffer);
+  resetModemLineAssembler(&modemLineAssembler);
+  return true;
 }
 
 // 检查字符串是否为有效的十六进制PDU数据
