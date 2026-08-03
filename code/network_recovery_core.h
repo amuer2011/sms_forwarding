@@ -20,6 +20,13 @@ struct OperatorCandidate {
   int8_t act;
 };
 
+enum ModemIoOwner : uint8_t {
+  MODEM_IO_NONE = 0,
+  MODEM_IO_SYNC = 1,
+  MODEM_IO_RECOVERY = 2,
+  MODEM_IO_SMS = 3
+};
+
 constexpr uint8_t MAX_SCANNED_OPERATORS = 12;
 
 struct CopsScanParser {
@@ -40,5 +47,7 @@ uint8_t buildOrderedCandidates(const CopsScanParser& parser,
                                uint8_t capacity);
 bool shouldTryLastGood(uint8_t failCount);
 uint8_t incrementFailureCount(uint8_t failCount);
+bool acquireModemIoOwner(ModemIoOwner* current, ModemIoOwner requested);
+bool releaseModemIoOwner(ModemIoOwner* current, ModemIoOwner requested);
 
 #endif

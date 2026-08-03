@@ -16,6 +16,7 @@ bool isInNumberBlackList(const char* sender);
 bool isAdmin(const char* sender);
 void processAdminCommand(const char* sender, const char* text);
 void processSmsContent(const char* sender, const char* text, const char* timestamp);
+bool processModemUrcLine(const String& line);
 void checkSerial1URC();
 
 #endif

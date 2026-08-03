@@ -49,10 +49,22 @@ static void testLastGoodFailureThreshold() {
   assert(incrementFailureCount(255) == 255);
 }
 
+static void testModemIoOwnership() {
+  ModemIoOwner owner = MODEM_IO_NONE;
+  assert(acquireModemIoOwner(&owner, MODEM_IO_SYNC));
+  assert(owner == MODEM_IO_SYNC);
+  assert(!acquireModemIoOwner(&owner, MODEM_IO_RECOVERY));
+  assert(!releaseModemIoOwner(&owner, MODEM_IO_RECOVERY));
+  assert(owner == MODEM_IO_SYNC);
+  assert(releaseModemIoOwner(&owner, MODEM_IO_SYNC));
+  assert(owner == MODEM_IO_NONE);
+}
+
 int main() {
   testCeregParsing();
   testCurrentOperatorParsing();
   testCopsScanOrdering();
   testLastGoodFailureThreshold();
+  testModemIoOwnership();
   return 0;
 }

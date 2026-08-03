@@ -299,3 +299,21 @@ uint8_t incrementFailureCount(uint8_t failCount) {
   return failCount == UINT8_MAX ? UINT8_MAX
                                 : static_cast<uint8_t>(failCount + 1);
 }
+
+bool acquireModemIoOwner(ModemIoOwner* current, ModemIoOwner requested) {
+  if (current == nullptr || requested == MODEM_IO_NONE ||
+      *current != MODEM_IO_NONE) {
+    return false;
+  }
+  *current = requested;
+  return true;
+}
+
+bool releaseModemIoOwner(ModemIoOwner* current, ModemIoOwner requested) {
+  if (current == nullptr || requested == MODEM_IO_NONE ||
+      *current != requested) {
+    return false;
+  }
+  *current = MODEM_IO_NONE;
+  return true;
+}
