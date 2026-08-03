@@ -204,7 +204,7 @@ ESP32-C3                   4G 模组
 
 ### network_recovery.h / network_recovery.cpp — 网络恢复
 
-- 冷启动始终先执行 `AT+COPS=0`，不硬编码 `46001`。
+- 冷启动始终先执行 `AT+COPS=0`，兜底 PLMN 来自对应 SIM 的成功缓存或本轮扫描结果。
 - 自动等待 120 秒；last-good 180 秒；扫描 180 秒；候选 4 个，每个 60 秒。
 - 成功运营商按 ICCID 写入 `Preferences` 命名空间 `plmn_cache`，固定 4 个槽位。
 - 缓存字段为 ICCID、PLMN、ACT、最后成功时间和失败次数；连续 3 次 last-good 失败后降级为普通扫描候选。
