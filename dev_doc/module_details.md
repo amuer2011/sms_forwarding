@@ -15,7 +15,7 @@
    └── (MODEM_EN_PIN 在 modemPowerCycle 内设置)
 
 2. 串口初始化
-   ├── Serial.begin(115200); delay(1500)                   // USB CDC 稳定
+   ├── Serial.begin(115200); delay(200)                    // USB CDC 稳定
    └── Serial1.begin(115200, SERIAL_8N1, RXD, TXD)        // 模组 UART
 
 3. 模组上电
@@ -28,36 +28,33 @@
    ├── loadConfig()                                          // NVS → config
    └── configValid = isConfigValid()                        // 校验
 
-5. 模组初始化 (AT 指令序列，每步失败重试+LED闪烁)
-   ├── sendATandWaitOK("AT", 1000)                          // 握手
-   ├── sendATandWaitOK("AT+CGACT=0,1", 5000)               // 禁数据(省流量)
-   ├── sendATandWaitOK("AT+CNMI=2,2,0,0,0", 1000)          // 短信URC上报
-   ├── sendATandWaitOK("AT+CMGF=0", 1000)                   // PDU模式
-   └── waitCEREG()                                           // 等网络注册
+5. WiFi 连接
+   ├── WiFi.setScanMethod(WIFI_FAST_SCAN)                    // 快速扫描
+   ├── WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL)
+   └── WiFi.begin(SSID, PASS)
 
-6. WiFi 连接
-   ├── WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN)             // 扫描全部信道
-   └── WiFi.begin(SSID, PASS, 0, nullptr, true)              // 支持隐藏SSID
-
-7. NTP 时间同步
-   ├── configTime(0, 0, "ntp.ntsc.ac.cn", ...)              // UTC时区
-   └── 等待 time() > 100000 (最多10秒)
-
-8. HTTP 服务器
+6. HTTP 服务器
    ├── server.on("/", handleRoot)
    ├── server.on("/save", HTTP_POST, handleSave)
-   ├── server.on("/tools", handleRoot)                       # 兼容旧链接
-   ├── server.on("/sms", handleRoot)                         # 兼容旧链接
    ├── server.on("/sendsms", HTTP_POST, handleSendSms)
    ├── server.on("/ping", HTTP_POST, handlePing)
    ├── server.on("/query", handleQuery)
    ├── server.on("/flight", handleFlightMode)
    ├── server.on("/at", handleATCommand)
-   ├── server.on("/log", handleLog)                          # 系统日志 JSON
+   ├── server.on("/log", handleLog)
    └── server.begin()
 
-9. 启动通知
+7. NTP 时间同步
+   ├── configTime(0, 0, "ntp.ntsc.ac.cn", ...)              // UTC时区
+   └── 短暂等待 time() > 100000，失败则后续继续使用设备时间
+
+8. 启动通知
    └── if(configValid) sendEmailNotification("短信转发器已启动", ...)
+
+9. 模组基础初始化
+   ├── AT 握手、ATI 型号识别
+   ├── AT+CGACT=0,1、AT+CNMI、AT+CMGF
+   └── beginNetworkRecovery()                                // 非阻塞注册并立即返回
 ```
 
 ### loop() 执行顺序（每帧执行）
@@ -66,15 +63,17 @@
 server.handleClient();        // 1. 处理HTTP请求
 if(!configValid) { ... }      // 2. 配置无效时每秒打印IP
 checkConcatTimeout();          // 3. 长短信超时合并转发
-if(Serial.available())        // 4. USB->模组透传(单字节)
+processPendingSmsQueue();       // 4. 补发WiFi离线短信
+serviceNetworkRecovery();      // 5. 推进非阻塞网络恢复，每帧最多读取64字节
+if(Serial.available())         // 6. 空闲时USB->模组透传
     Serial1.write(Serial.read());
-checkSerial1URC();             // 5. 检查模组URC(短信上报)
+checkSerial1URC();             // 7. 串口未被事务占用时检查短信URC
 ```
 
 ### 修改指南
 
 - **新增 HTTP 路由**: 在 `web_handlers.h/.cpp` 添加处理函数，然后在 `setup()` 中 `server.on("/path", handler)`
-- **调整初始化顺序**: 直接修改 `setup()` 中的代码顺序即可，注意模组初始化必须在 WiFi 之前
+- **调整初始化顺序**: 保持 HTTP 服务先启动、网络注册状态机后启动，确保注册恢复期间网页可访问
 - **禁用某功能**: 注释掉对应的 `server.on()` 行即可
 
 ---
@@ -198,8 +197,19 @@ ESP32-C3                   4G 模组
 
 | 函数 | 返回类型 | 延时处理 | 适用场景 |
 |---|---|---|---|
-| `sendATCommand()` | String (完整响应) | 收到 OK/ERROR 后 `delay(50)` | 需要解析响应内容 |
-| `sendATandWaitOK()` | bool | 无额外 delay | 快速幂等检查 |
+| `sendATCommand()` | String (完整响应) | 逐行读取到终止行 | 需要解析响应内容 |
+| `sendATandWaitOK()` | bool | 复用逐行响应读取 | 快速幂等检查 |
+
+`sendATCommand()`、短信发送、网络恢复和独立短信监听通过 `ModemIoOwner` 串行化访问 `Serial1`。同步命令完整读取终止行，不再把尾部 `OK` 留给下一条命令，也不在等待期间递归调用 HTTP 处理器。
+
+### network_recovery.h / network_recovery.cpp — 网络恢复
+
+- 冷启动始终先执行 `AT+COPS=0`，兜底 PLMN 来自对应 SIM 的成功缓存或本轮扫描结果。
+- 自动等待 120 秒；last-good 180 秒；扫描 180 秒；候选 4 个，每个 60 秒。
+- 成功运营商按 ICCID 写入 `Preferences` 命名空间 `plmn_cache`，固定 4 个槽位。
+- 缓存字段为 ICCID、PLMN、ACT、最后成功时间和失败次数；连续 3 次 last-good 失败后降级为普通扫描候选。
+- 手动恢复成功后本次启动保持手动模式，冷启动重新自动选网。
+- 全部失败时切回自动模式并退避 10 分钟，不循环切换 `CFUN`，不重启 ESP32。
 
 ### 模组电源控制
 
@@ -385,6 +395,8 @@ checkSerial1URC() 循环:
 - **添加新管理员命令**: 在 `processAdminCommand()` 中添加 `else if` 分支
 - **更换短信库**: 修改 `checkSerial1URC()` 中的 `pdu.decodePDU()` 调用
 
+`processModemUrcLine()` 保存 `+CMT`/PDU 状态。同步 AT、Ping 和网络恢复事务读到短信行时都会调用它，因此短信 URC 不会混入普通 AT 响应。`readSerialLineLimited()` 使用共享定长行组装器，可跨多次 `loop()` 保存半行数据。
+
 ---
 
 ## web_handlers.h / web_handlers.cpp — HTTP 处理 + 日志系统
@@ -439,6 +451,8 @@ SPA 页面中的 `%PLACEHOLDER%` 在 `handleRoot()` 中通过 `html.replace()` �
 | `/` `/tools` `/sms` `/save` | `text/html` | HTML 页面 |
 | `/query` `/flight` `/at` `/ping` | `application/json` | `{"success":bool, "message":"..."}` |
 | `/log` | `application/json` | `["行1", "行2", ...]` |
+
+网络恢复持有模组串口时，`/query`、`/flight`、`/at`、`/sendsms`、`/ping` 和 `/modem` 返回 HTTP 429；主页、日志、配置和 WiFi 路由不受影响。
 
 ### 修改指南
 

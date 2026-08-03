@@ -1,3 +1,4 @@
 code/wifi_config.h
 .build/
 backups/
+.worktrees/

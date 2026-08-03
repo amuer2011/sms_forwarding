@@ -82,10 +82,11 @@
 - `timeout`: 等待超时（毫秒）
 
 **行为**:
-1. 清空 Serial1 缓冲区
+1. 获取 `MODEM_IO_SYNC` 串口所有权
 2. 发送 `cmd\r\n`
-3. 等待直到收到 "OK" 或 "ERROR" 或超时
-4. 收到 OK/ERROR 后额外 `delay(50)` 读取剩余数据
+3. 逐行读取直到完整的 `OK`、`ERROR`、`+CME ERROR`、`+CMS ERROR` 或超时
+4. 将夹在响应中的 `+CMT` 和 PDU 转交 `processModemUrcLine()`
+5. 释放串口所有权
 
 **返回**: 模组完整响应字符串（含 OK/ERROR）
 
@@ -104,9 +105,8 @@
 ### `void resetModule()`
 **行为**:
 1. 调用 `modemPowerCycle()`
-2. 清空 Serial1
-3. 循环 10 次尝试 `sendATandWaitOK("AT", 1000)`
-4. 打印恢复结果
+2. 调用 `modemInit()` 重新执行基础初始化
+3. 启动新的非阻塞网络恢复流程
 
 ---
 
@@ -116,7 +116,7 @@
 ---
 
 ### `bool waitCEREG()`
-**用途**: 轮询 `AT+CEREG?` 直到网络注册成功。
+**用途**: 兼容性单次查询。发送一次 `AT+CEREG?`，使用结构化解析器判断是否已注册；启动流程不再用它阻塞轮询。
 
 **注册状态码**:
 - `1`: 已注册本地网络 → true
@@ -279,6 +279,28 @@ HMAC-SHA256(timestamp + "\n" + secret, secret) → Base64 → URLEncode
 
 IDLE 状态检测 `+CMT:` 行 → 转入 WAIT_PDU。
 WAIT_PDU 状态读取 PDU hex 数据 → `pdu.decodePDU()` 解析 → 根据 `concatInfo` 判断长短信/普通短信 → 恢复 IDLE。
+
+---
+
+## 模块: network_recovery.cpp — 网络自动恢复
+
+### `void beginNetworkRecovery()`
+清空本轮运行状态，从 `WAIT_SIM` 开始非阻塞注册流程。冷启动始终选择自动模式，不直接固定任何 PLMN。
+
+### `void serviceNetworkRecovery()`
+由主 `loop()` 每帧调用。推进异步 AT 事务和恢复状态机，每帧最多读取 64 个串口字节。成功状态同时接受 `CEREG=1` 和 `CEREG=5`。
+
+恢复顺序：自动 120 秒 → last-good 180 秒 → 单次扫描 180 秒 → 最多 4 个候选各 60 秒 → 自动模式退避 10 分钟。
+
+### `void resetNetworkRecovery()`
+释放恢复事务持有的串口所有权并清空运行状态。模组重新初始化前调用。
+
+### `bool networkRecoveryBusy()`
+返回恢复事务当前是否持有模组串口。
+
+### 运营商缓存
+
+`operator_cache.cpp` 使用 `Preferences` 命名空间 `plmn_cache` 保存 4 个 SIM 槽位。键为 `i0..i3`、`p0..p3`、`a0..a3`、`t0..t3`、`f0..f3` 和轮转指针 `next`。ICCID 为空时不会读写缓存。
 
 ---
 

@@ -1,29 +1,68 @@
 #include "modem.h"
+#include "network_recovery.h"
+#include "sms_process.h"
 #include "web_handlers.h"
+
+namespace {
+
+ModemIoOwner currentModemIoOwner = MODEM_IO_NONE;
+
+bool isFinalResponseLine(const String& line) {
+  return line == "OK" || line == "ERROR" || line.startsWith("+CME ERROR") ||
+         line.startsWith("+CMS ERROR");
+}
+
+bool isSuccessfulResponse(const String& response) {
+  return response.endsWith("OK\r\n");
+}
+
+}  // namespace
+
+bool acquireModemIo(ModemIoOwner owner) {
+  return acquireModemIoOwner(&currentModemIoOwner, owner);
+}
+
+void releaseModemIo(ModemIoOwner owner) {
+  if (!releaseModemIoOwner(&currentModemIoOwner, owner)) {
+    logCaptureLn(String("模组串口所有权释放不匹配"));
+  }
+}
+
+bool modemIoBusy() {
+  return currentModemIoOwner != MODEM_IO_NONE;
+}
 
 // 发送AT命令并获取响应
 String sendATCommand(const char* cmd, unsigned long timeout) {
-  while (Serial1.available()) Serial1.read();
+  if (!acquireModemIo(MODEM_IO_SYNC)) {
+    logCaptureLn(String("模组串口忙，无法发送: ") + cmd);
+    return "";
+  }
+
   Serial1.println(cmd);
-  
+
   unsigned long start = millis();
   String resp = "";
+  resp.reserve(256);
   while (millis() - start < timeout) {
-    if (Serial1.available()) {
-      char c = Serial1.read();
-      resp += c;
-      if (resp.indexOf("OK") >= 0 || resp.indexOf("ERROR") >= 0) {
-        // 读取剩余数据（最多 50ms）
-        unsigned long t = millis();
-        while (millis() - t < 50) {
-          if (Serial1.available()) resp += (char)Serial1.read();
-          server.handleClient();
-        }
-        return resp;
-      }
+    String line = readSerialLine(Serial1);
+    if (line.length() == 0) {
+      delay(1);
+      continue;
     }
-    server.handleClient();
+
+    if (processModemUrcLine(line)) {
+      continue;
+    }
+
+    line.trim();
+    if (line.length() == 0) continue;
+    resp += line;
+    resp += "\r\n";
+    if (isFinalResponseLine(line)) break;
   }
+
+  releaseModemIo(MODEM_IO_SYNC);
   return resp;
 }
 
@@ -49,6 +88,9 @@ void resetModule() {
 
 // 模组 AT 初始化流程（setup 中调用，resetModule 后也调用）
 void modemInit() {
+  resetNetworkRecovery();
+  modemReady = false;
+
   // 清掉上电噪声/残留
   while (Serial1.available()) Serial1.read();
 
@@ -69,9 +111,9 @@ void modemInit() {
     String version = "未知";
     
     // 按行解析
-    int lineStart = 0;
+    unsigned int lineStart = 0;
     int lineNum = 0;
-    for (int i = 0; i < resp.length(); i++) {
+    for (unsigned int i = 0; i < resp.length(); i++) {
       if (resp.charAt(i) == '\n' || i == resp.length() - 1) {
         String line = resp.substring(lineStart, i);
         line.trim();
@@ -107,19 +149,7 @@ void modemInit() {
     blink_short();
   }
   logCaptureLn(String("PDU模式设置完成"));
-  int ceregRetry = 0;
-  while (!waitCEREG() && ceregRetry < 30) {
-    logCaptureLn(String("等待网络注册..."));
-    ceregRetry++;
-    blink_short();
-  }
-  if (ceregRetry < 30) {
-    logCaptureLn(String("网络已注册"));
-    modemReady = true;
-  } else {
-    logCaptureLn(String("⚠️ 网络注册超时（无SIM卡或信号差），模组功能不可用"));
-    modemReady = false;
-  }
+  beginNetworkRecovery();
 }
 
 void blink_short(unsigned long gap_time) {
@@ -130,45 +160,23 @@ void blink_short(unsigned long gap_time) {
 }
 
 bool sendATandWaitOK(const char* cmd, unsigned long timeout) {
-  while (Serial1.available()) Serial1.read();
-  Serial1.println(cmd);
-  unsigned long start = millis();
-  String resp = "";
-  while (millis() - start < timeout) {
-    if (Serial1.available()) {
-      char c = Serial1.read();
-      resp += c;
-      if (resp.indexOf("OK") >= 0) return true;
-      if (resp.indexOf("ERROR") >= 0) return false;
-    }
-    server.handleClient();
-  }
-  return false;
+  return isSuccessfulResponse(sendATCommand(cmd, timeout));
 }
 
 // 检测网络注册状态（LTE/4G）
 // CEREG状态: 1=已注册本地, 5=已注册漫游
 bool waitCEREG() {
-  Serial1.println("AT+CEREG?");
-  unsigned long start = millis();
-  String resp = "";
-  while (millis() - start < 2000) {
-    if (Serial1.available()) {
-      char c = Serial1.read();
-      resp += c;
-      if (resp.indexOf("+CEREG:") >= 0) {
-        if (resp.indexOf(",1") >= 0 || resp.indexOf(",5") >= 0) return true;
-        if (resp.indexOf(",0") >= 0 || resp.indexOf(",2") >= 0 || 
-            resp.indexOf(",3") >= 0 || resp.indexOf(",4") >= 0) return false;
-      }
-    }
-    server.handleClient();
-  }
-  return false;
+  const RegState state = parseCeregState(sendATCommand("AT+CEREG?", 2000).c_str());
+  return state == REG_HOME || state == REG_ROAMING;
 }
 
 // 发送短信（PDU模式）
 bool sendSMS(const char* phoneNumber, const char* message) {
+  if (!acquireModemIo(MODEM_IO_SMS)) {
+    logCaptureLn(String("模组串口忙，暂时无法发送短信"));
+    return false;
+  }
+
   logCaptureLn(String("准备发送短信..."));
   logCapture(String("目标号码: ")); logCaptureLn(String(phoneNumber));
   logCapture(String("短信内容: ")); logCaptureLn(String(message));
@@ -180,6 +188,7 @@ bool sendSMS(const char* phoneNumber, const char* message) {
   if (pduLen < 0) {
     logCapture(String("PDU编码失败，错误码: "));
     logCaptureLn(String(pduLen));
+    releaseModemIo(MODEM_IO_SMS);
     return false;
   }
   
@@ -190,7 +199,6 @@ bool sendSMS(const char* phoneNumber, const char* message) {
   String cmgsCmd = "AT+CMGS=";
   cmgsCmd += pduLen;
   
-  while (Serial1.available()) Serial1.read();
   Serial1.println(cmgsCmd);
   
   // 等待 > 提示符
@@ -204,12 +212,17 @@ bool sendSMS(const char* phoneNumber, const char* message) {
         gotPrompt = true;
         break;
       }
+      String line;
+      if (feedModemInputChar(c, &line) && line.length() > 0) {
+        processModemUrcLine(line);
+      }
     }
-    server.handleClient();
+    delay(1);
   }
   
   if (!gotPrompt) {
     logCaptureLn(String("未收到>提示符"));
+    releaseModemIo(MODEM_IO_SMS);
     return false;
   }
   
@@ -221,21 +234,30 @@ bool sendSMS(const char* phoneNumber, const char* message) {
   start = millis();
   String resp = "";
   while (millis() - start < 30000) {
-    while (Serial1.available()) {
-      char c = Serial1.read();
-      resp += c;
-      logCapture(String(c));
-      if (resp.indexOf("OK") >= 0) {
-        logCaptureLn(String("\n短信发送成功"));
-        return true;
-      }
-      if (resp.indexOf("ERROR") >= 0) {
-        logCaptureLn(String("\n短信发送失败"));
-        return false;
-      }
+    String line = readSerialLine(Serial1);
+    if (line.length() == 0) {
+      delay(1);
+      continue;
     }
-    server.handleClient();
+
+    if (processModemUrcLine(line)) continue;
+    line.trim();
+    if (line.length() == 0) continue;
+    resp += line;
+    resp += "\r\n";
+    logCaptureLn(line);
+    if (line == "OK") {
+      logCaptureLn(String("短信发送成功"));
+      releaseModemIo(MODEM_IO_SMS);
+      return true;
+    }
+    if (line == "ERROR" || line.startsWith("+CMS ERROR")) {
+      logCaptureLn(String("短信发送失败"));
+      releaseModemIo(MODEM_IO_SMS);
+      return false;
+    }
   }
   logCaptureLn(String("短信发送超时"));
+  releaseModemIo(MODEM_IO_SMS);
   return false;
 }

@@ -2,8 +2,12 @@
 #define MODEM_H
 
 #include "globals.h"
+#include "network_recovery_core.h"
 
 String sendATCommand(const char* cmd, unsigned long timeout);
+bool acquireModemIo(ModemIoOwner owner);
+void releaseModemIo(ModemIoOwner owner);
+bool modemIoBusy();
 void modemPowerCycle();
 void resetModule();
 void modemInit();

@@ -3,6 +3,7 @@
 #include "config.h"
 #include "modem.h"
 #include "push.h"
+#include "sms_process.h"
 #include "wifi_config.h"
 
 // ---- 日志环形缓冲区 ----
@@ -68,6 +69,13 @@ bool checkAuth() {
     server.requestAuthentication(BASIC_AUTH, "SMS Forwarding", "请输入管理员账号密码");
     return false;
   }
+  return true;
+}
+
+static bool rejectIfModemBusy() {
+  if (!modemIoBusy()) return false;
+  server.send(429, "application/json",
+              "{\"success\":false,\"message\":\"模组正在恢复网络，请稍后重试\"}");
   return true;
 }
 
@@ -189,6 +197,7 @@ void handleToolsPage() {
 // 处理飞行模式控制请求
 void handleFlightMode() {
   if (!checkAuth()) return;
+  if (rejectIfModemBusy()) return;
   
   String action = server.arg("action");
   String json = "{";
@@ -297,6 +306,7 @@ void handleFlightMode() {
 // 处理AT指令测试请求
 void handleATCommand() {
   if (!checkAuth()) return;
+  if (rejectIfModemBusy()) return;
   
   String cmd = server.arg("cmd");
   bool success = false;
@@ -328,6 +338,7 @@ void handleATCommand() {
 // 处理模组信息查询请求
 void handleQuery() {
   if (!checkAuth()) return;
+  if (rejectIfModemBusy()) return;
   
   String type = server.arg("type");
   String json = "{";
@@ -492,24 +503,16 @@ void handleQuery() {
     
     // 查询网络注册状态
     String resp = sendATCommand("AT+CEREG?", 2000);
-    String regStatus = "未知";
-    if (resp.indexOf("+CEREG:") >= 0) {
-      int idx = resp.indexOf("+CEREG:");
-      String tmp = resp.substring(idx + 7);
-      int commaIdx = tmp.indexOf(',');
-      if (commaIdx >= 0) {
-        String stat = tmp.substring(commaIdx + 1, commaIdx + 2);
-        int s = stat.toInt();
-        switch(s) {
-          case 0: regStatus = "未注册，未搜索"; break;
-          case 1: regStatus = "已注册，本地网络"; break;
-          case 2: regStatus = "未注册，正在搜索"; break;
-          case 3: regStatus = "注册被拒绝"; break;
-          case 4: regStatus = "未知"; break;
-          case 5: regStatus = "已注册，漫游"; break;
-          default: regStatus = "状态码: " + stat;
-        }
-      }
+    String regStatus;
+    switch (parseCeregState(resp.c_str())) {
+      case REG_NOT_REGISTERED: regStatus = "未注册，未搜索"; break;
+      case REG_HOME: regStatus = "已注册，本地网络"; break;
+      case REG_SEARCHING: regStatus = "未注册，正在搜索"; break;
+      case REG_DENIED: regStatus = "注册被拒绝"; break;
+      case REG_NETWORK_UNKNOWN: regStatus = "网络状态未知"; break;
+      case REG_ROAMING: regStatus = "已注册，漫游"; break;
+      case REG_PARSE_UNKNOWN:
+      default: regStatus = "响应解析失败"; break;
     }
     message += "<tr><td>网络注册</td><td>" + regStatus + "</td></tr>";
     
@@ -619,6 +622,7 @@ void handleQuery() {
 // 处理发送短信请求
 void handleSendSms() {
   if (!checkAuth()) return;
+  if (rejectIfModemBusy()) return;
   
   String phone = server.arg("phone");
   String content = server.arg("content");
@@ -675,11 +679,9 @@ void handleSendSms() {
 // 处理Ping请求
 void handlePing() {
   if (!checkAuth()) return;
+  if (rejectIfModemBusy()) return;
   
   logCaptureLn(String("网页端发起Ping请求"));
-  
-  // 清空串口缓冲区
-  while (Serial1.available()) Serial1.read();
   
   // 激活PDP上下文（数据连接）
   logCaptureLn(String("激活数据连接(CGACT)..."));
@@ -692,137 +694,92 @@ void handlePing() {
     logCaptureLn(String("数据连接激活失败，尝试继续执行..."));
   }
   
-  // 清空串口缓冲区
-  while (Serial1.available()) Serial1.read();
   delay(500);  // 等待网络稳定
-  
+
+  if (!acquireModemIo(MODEM_IO_SYNC)) {
+    server.send(429, "application/json",
+                "{\"success\":false,\"message\":\"模组正在恢复网络，请稍后重试\"}");
+    return;
+  }
+
   // 发送MPING命令，ping 8.8.8.8，超时30秒，ping 1次
   Serial1.println("AT+MPING=\"8.8.8.8\",30,1");
   
   // 等待响应
   unsigned long start = millis();
-  String resp = "";
-  bool gotOK = false;
   bool gotError = false;
   bool gotPingResult = false;
   String pingResultMsg = "";
   
   // 等待最多35秒（30秒超时 + 5秒余量）
   while (millis() - start < 35000) {
-    while (Serial1.available()) {
-      char c = Serial1.read();
-      resp += c;
-      logCapture(String(c));  // 调试输出
-      
-      // 检查是否收到OK
-      if (resp.indexOf("OK") >= 0 && !gotOK) {
-        gotOK = true;
+    String line = readSerialLine(Serial1);
+    if (line.length() == 0) {
+      delay(1);
+      continue;
+    }
+
+    if (processModemUrcLine(line)) continue;
+    line.trim();
+    if (line.length() == 0) continue;
+    logCaptureLn(line);
+
+    if (line == "ERROR" || line.startsWith("+CME ERROR")) {
+      gotError = true;
+      pingResultMsg = "模组返回错误";
+      break;
+    }
+    if (!line.startsWith("+MPING:")) continue;
+
+    String params = line.substring(line.indexOf(':') + 1);
+    params.trim();
+    int commaIdx = params.indexOf(',');
+    String resultStr = commaIdx >= 0 ? params.substring(0, commaIdx) : params;
+    resultStr.trim();
+    int result = resultStr.toInt();
+    gotPingResult = true;
+
+    bool pingSuccess = (result == 0 || result == 1) ||
+                       (commaIdx >= 0 && params.length() > 5);
+    if (!pingSuccess) {
+      pingResultMsg = "Ping超时或目标不可达 (错误码: " + String(result) + ")";
+      break;
+    }
+
+    String rest = commaIdx >= 0 ? params.substring(commaIdx + 1) : "";
+    String ip;
+    int nextComma = -1;
+    if (rest.startsWith("\"")) {
+      int quoteEnd = rest.indexOf('\"', 1);
+      if (quoteEnd >= 0) {
+        ip = rest.substring(1, quoteEnd);
+        nextComma = rest.indexOf(',', quoteEnd);
       }
-      
-      // 检查是否收到ERROR
-      if (resp.indexOf("+CME ERROR") >= 0 || resp.indexOf("ERROR") >= 0) {
-        gotError = true;
-        pingResultMsg = "模组返回错误";
-        break;
-      }
-      
-      // 检查是否收到Ping结果URC
-      // 成功格式: +MPING: 1,8.8.8.8,32,xxx,xxx
-      // 失败格式: +MPING: 2 或其他
-      int mpingIdx = resp.indexOf("+MPING:");
-      if (mpingIdx >= 0) {
-        // 找到换行符确定完整的一行
-        int lineEnd = resp.indexOf('\n', mpingIdx);
-        if (lineEnd >= 0) {
-          String mpingLine = resp.substring(mpingIdx, lineEnd);
-          mpingLine.trim();
-          logCaptureLn(String("收到MPING结果: " + mpingLine));
-          
-          // 解析结果
-          // +MPING: <result>[,<ip>,<packet_len>,<time>,<ttl>]
-          int colonIdx = mpingLine.indexOf(':');
-          if (colonIdx >= 0) {
-            String params = mpingLine.substring(colonIdx + 1);
-            params.trim();
-            
-            // 获取第一个参数（result）
-            int commaIdx = params.indexOf(',');
-            String resultStr;
-            if (commaIdx >= 0) {
-              resultStr = params.substring(0, commaIdx);
-            } else {
-              resultStr = params;
-            }
-            resultStr.trim();
-            int result = resultStr.toInt();
-            
-            gotPingResult = true;
-            
-            // result=0或1都表示成功（不同模组可能返回不同值）
-            // 如果有完整的响应参数（IP、时间等），也视为成功
-            bool pingSuccess = (result == 0 || result == 1) || (params.indexOf(',') >= 0 && params.length() > 5);
-            
-            if (pingSuccess) {
-              // 成功，解析详细信息
-              // 格式: 0/1,"8.8.8.8",16,时间,TTL
-              int idx1 = params.indexOf(',');
-              if (idx1 >= 0) {
-                String rest = params.substring(idx1 + 1);
-                // 处理IP地址（可能带引号）
-                String ip;
-                int idx2;
-                if (rest.startsWith("\"")) {
-                  // 带引号的IP
-                  int quoteEnd = rest.indexOf('\"', 1);
-                  if (quoteEnd >= 0) {
-                    ip = rest.substring(1, quoteEnd);
-                    idx2 = rest.indexOf(',', quoteEnd);
-                  } else {
-                    idx2 = rest.indexOf(',');
-                    ip = rest.substring(0, idx2);
-                  }
-                } else {
-                  idx2 = rest.indexOf(',');
-                  ip = rest.substring(0, idx2);
-                }
-                
-                if (idx2 >= 0) {
-                  rest = rest.substring(idx2 + 1);
-                  int idx3 = rest.indexOf(',');  // packet_len后
-                  if (idx3 >= 0) {
-                    rest = rest.substring(idx3 + 1);
-                    int idx4 = rest.indexOf(',');  // time后
-                    String timeStr, ttlStr;
-                    if (idx4 >= 0) {
-                      timeStr = rest.substring(0, idx4);
-                      ttlStr = rest.substring(idx4 + 1);
-                    } else {
-                      timeStr = rest;
-                      ttlStr = "N/A";
-                    }
-                    timeStr.trim();
-                    ttlStr.trim();
-                    pingResultMsg = "目标: " + ip + ", 延迟: " + timeStr + "ms, TTL: " + ttlStr;
-                  }
-                }
-              }
-              if (pingResultMsg.length() == 0) {
-                pingResultMsg = "Ping成功";
-              }
-            } else {
-              // 失败
-              pingResultMsg = "Ping超时或目标不可达 (错误码: " + String(result) + ")";
-            }
-            break;
-          }
-        }
+    } else {
+      nextComma = rest.indexOf(',');
+      ip = nextComma >= 0 ? rest.substring(0, nextComma) : rest;
+    }
+
+    if (nextComma >= 0) {
+      rest = rest.substring(nextComma + 1);
+      int packetComma = rest.indexOf(',');
+      if (packetComma >= 0) {
+        rest = rest.substring(packetComma + 1);
+        int timeComma = rest.indexOf(',');
+        String timeStr = timeComma >= 0 ? rest.substring(0, timeComma) : rest;
+        String ttlStr = timeComma >= 0 ? rest.substring(timeComma + 1) : "N/A";
+        timeStr.trim();
+        ttlStr.trim();
+        pingResultMsg = "目标: " + ip + ", 延迟: " + timeStr +
+                        "ms, TTL: " + ttlStr;
       }
     }
-    
-    if (gotError || gotPingResult) break;
-    server.handleClient();
+    if (pingResultMsg.length() == 0) pingResultMsg = "Ping成功";
+    break;
   }
-  
+
+  releaseModemIo(MODEM_IO_SYNC);
+
   logCaptureLn(String("\nPing操作完成"));
   
   // 关闭数据连接以节省流量
@@ -978,9 +935,9 @@ void handleLog() {
 // 模组控制命令
 void handleModem() {
   if (!checkAuth()) return;
+  if (rejectIfModemBusy()) return;
 
-  // 防止重入：modemInit() 内部会调 server.handleClient()，
-  // 若浏览器超时重试会导致嵌套调用，最终拖垮 WiFi
+  // 防止同一长耗时控制操作被重复触发。
   static bool busy = false;
   if (busy) {
     server.send(429, "application/json", "{\"success\":false,\"message\":\"模组正忙，请稍后重试\"}");
@@ -1010,6 +967,7 @@ void handleModem() {
     logCaptureLn(String("网页端请求硬重启模组..."));
     server.send(200, "application/json", "{\"success\":true,\"message\":\"正在硬重启模组，请等待约 15 秒后刷新页面\"}");
     resetModule();
+    busy = false;
     return;
   }
   else if (action == "signal") {
