@@ -503,24 +503,16 @@ void handleQuery() {
     
     // 查询网络注册状态
     String resp = sendATCommand("AT+CEREG?", 2000);
-    String regStatus = "未知";
-    if (resp.indexOf("+CEREG:") >= 0) {
-      int idx = resp.indexOf("+CEREG:");
-      String tmp = resp.substring(idx + 7);
-      int commaIdx = tmp.indexOf(',');
-      if (commaIdx >= 0) {
-        String stat = tmp.substring(commaIdx + 1, commaIdx + 2);
-        int s = stat.toInt();
-        switch(s) {
-          case 0: regStatus = "未注册，未搜索"; break;
-          case 1: regStatus = "已注册，本地网络"; break;
-          case 2: regStatus = "未注册，正在搜索"; break;
-          case 3: regStatus = "注册被拒绝"; break;
-          case 4: regStatus = "未知"; break;
-          case 5: regStatus = "已注册，漫游"; break;
-          default: regStatus = "状态码: " + stat;
-        }
-      }
+    String regStatus;
+    switch (parseCeregState(resp.c_str())) {
+      case REG_NOT_REGISTERED: regStatus = "未注册，未搜索"; break;
+      case REG_HOME: regStatus = "已注册，本地网络"; break;
+      case REG_SEARCHING: regStatus = "未注册，正在搜索"; break;
+      case REG_DENIED: regStatus = "注册被拒绝"; break;
+      case REG_NETWORK_UNKNOWN: regStatus = "网络状态未知"; break;
+      case REG_ROAMING: regStatus = "已注册，漫游"; break;
+      case REG_PARSE_UNKNOWN:
+      default: regStatus = "响应解析失败"; break;
     }
     message += "<tr><td>网络注册</td><td>" + regStatus + "</td></tr>";
     
