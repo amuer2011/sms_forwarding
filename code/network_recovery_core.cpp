@@ -290,3 +290,12 @@ uint8_t buildOrderedCandidates(const CopsScanParser& parser,
   }
   return count;
 }
+
+bool shouldTryLastGood(uint8_t failCount) {
+  return failCount < 3;
+}
+
+uint8_t incrementFailureCount(uint8_t failCount) {
+  return failCount == UINT8_MAX ? UINT8_MAX
+                                : static_cast<uint8_t>(failCount + 1);
+}

@@ -41,9 +41,18 @@ static void testCopsScanOrdering() {
   assert(strcmp(ordered[3].plmn, "46015") == 0);
 }
 
+static void testLastGoodFailureThreshold() {
+  assert(shouldTryLastGood(0));
+  assert(shouldTryLastGood(2));
+  assert(!shouldTryLastGood(3));
+  assert(incrementFailureCount(2) == 3);
+  assert(incrementFailureCount(255) == 255);
+}
+
 int main() {
   testCeregParsing();
   testCurrentOperatorParsing();
   testCopsScanOrdering();
+  testLastGoodFailureThreshold();
   return 0;
 }

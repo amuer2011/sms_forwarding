@@ -38,5 +38,7 @@ uint8_t buildOrderedCandidates(const CopsScanParser& parser,
                                const char* attemptedPlmn,
                                OperatorCandidate* output,
                                uint8_t capacity);
+bool shouldTryLastGood(uint8_t failCount);
+uint8_t incrementFailureCount(uint8_t failCount);
 
 #endif
