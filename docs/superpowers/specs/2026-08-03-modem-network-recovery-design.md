@@ -1,285 +1,262 @@
-# ML307R Network Recovery Design
+# ML307R 网络自动恢复设计
 
-## Context
+## 背景
 
-The firmware currently waits for LTE registration during `modemInit()` and reduces
-all non-successful `AT+CEREG?` states to a boolean failure. It does not configure
-`AT+COPS`, remember a successful operator, or recover when automatic selection
-skips an operator that was temporarily marked forbidden.
+当前固件在 `modemInit()` 中等待 LTE 注册，并将所有未注册成功的
+`AT+CEREG?` 状态压缩为布尔失败。固件不会配置 `AT+COPS`，不会记录成功
+注册过的运营商，也无法在自动选网跳过被临时标记为 forbidden 的运营商时
+自动恢复。
 
-The observed failure was:
+本次实际故障过程如下：
 
-1. The active 9eSIM profile was readable and returned IMSI `24802...`.
-2. Automatic selection returned `CEREG=3`.
-3. `AT+COPS=?` reported China Unicom `46001` with status `3` (forbidden).
-4. Manual selection of `46001` registered successfully with `CEREG=5`.
-5. Returning to `COPS=0` and cold-starting later registered automatically.
+1. 当前激活的 9eSIM Profile 可以读取，并返回 IMSI `24802...`。
+2. 自动选网时返回 `CEREG=3`。
+3. `AT+COPS=?` 将中国联通 `46001` 标记为状态 `3`，即 forbidden。
+4. 手动指定 `46001` 后，以 `CEREG=5` 成功注册。
+5. 恢复 `COPS=0` 后再次冷启动，设备可以正常自动注册。
 
-This shows that normal automatic selection should remain the default, but the
-firmware needs a bounded recovery path that can override a stale forbidden state.
+这说明正常流程仍应优先使用自动选网，但固件需要一个有边界的恢复流程，
+在出现过期 forbidden 状态时能够主动覆盖并恢复注册。
 
-## Goals
+## 目标
 
-- Keep automatic operator selection as the normal path.
-- Recover without user interaction when automatic registration times out or is
-  repeatedly rejected.
-- Support different physical SIMs and eSIM profiles without hard-coding `46001`.
-- Remember the last operator that actually worked for each SIM identity.
-- Scan and try candidate operators for a new SIM with no saved history.
-- Try a scanned forbidden operator as a final candidate because the observed
-  failure proved that manual selection can still succeed.
-- Keep the HTTP server responsive during long scans and registration attempts.
-- Prevent long AT commands from mixing responses with web diagnostics or SMS URCs.
-- Bound retries and add backoff so a network outage cannot create a reset loop.
+- 正常情况下继续使用自动选网。
+- 自动注册超时或持续被拒绝时，无需人工干预即可恢复。
+- 支持不同实体 SIM 和 eSIM Profile，不硬编码 `46001`。
+- 按 SIM 身份记录最后一个真正注册成功的运营商。
+- 新 SIM 没有历史记录时，可以扫描并逐个尝试候选运营商。
+- 将扫描结果中的 forbidden 运营商作为最后一类候选，因为本次故障已经证明
+  手动选择 forbidden 运营商仍可能成功。
+- 长时间扫描和注册期间保持 HTTP 服务可访问。
+- 防止长 AT 命令与网页诊断、短信 URC 相互串线。
+- 限制重试次数并增加退避时间，避免网络故障触发无限重启或无限扫描。
 
-## Non-Goals
+## 非目标
 
-- Directly edit the SIM/USIM `EF_FPLMN` file.
-- Hard-code operator mappings for every IMSI prefix.
-- Rework every modem feature into a general-purpose AT command framework.
-- Activate mobile data; the existing SMS-only behavior remains unchanged.
+- 不直接修改 SIM/USIM 的 `EF_FPLMN` 文件。
+- 不为所有 IMSI 前缀硬编码运营商映射。
+- 不在本次改动中将所有模组功能重构为通用 AT 命令框架。
+- 不启用蜂窝数据连接，继续保持现有短信用途和数据关闭策略。
 
-## Selected Approach
+## 选定方案
 
-Add a non-blocking network recovery state machine. The state machine owns the
-modem serial port while a registration command is active, but the ESP32 main loop
-continues to service WiFi and HTTP.
+增加一个非阻塞的网络恢复状态机。注册命令执行期间，状态机独占模组串口，
+但 ESP32 主循环仍会继续处理 WiFi 和 HTTP 请求。
 
-The existing synchronous modem helpers remain available for short initialization
-and diagnostic commands. Recovery commands use a separate long-running
-transaction path with explicit ownership and final-result parsing.
+现有同步模组辅助函数继续用于短时间初始化和诊断命令。网络恢复相关的长命令
+使用独立的长事务路径，具备明确的串口所有权和最终结果解析能力。
 
-## Registration State Model
+## 注册状态模型
 
-Replace the boolean-only registration result with a parsed status:
+使用明确的注册状态替代只返回布尔值的判断：
 
-| Status | Meaning | Recovery behavior |
+| 状态 | 含义 | 恢复行为 |
 |---|---|---|
-| `0` | Not registered, not searching | Continue until automatic deadline |
-| `1` | Registered, home | Success |
-| `2` | Searching | Continue waiting |
-| `3` | Registration denied | Count consecutive denials, then recover |
-| `4` | Unknown | Continue until deadline |
-| `5` | Registered, roaming | Success |
+| `0` | 未注册且未搜索 | 在自动注册截止时间内继续等待 |
+| `1` | 已注册本地网络 | 成功 |
+| `2` | 正在搜索 | 继续等待 |
+| `3` | 注册被拒绝 | 统计连续拒绝次数，达到阈值后恢复 |
+| `4` | 状态未知 | 在截止时间内继续等待 |
+| `5` | 已注册漫游网络 | 成功 |
 
-Unknown future status values are logged and treated as not yet registered. The
-parser must extract the `stat` field structurally rather than searching for
-`,1` or `,5` anywhere in the complete response.
+未来出现未知状态码时记录日志，并按尚未注册处理。解析器必须按字段解析 `stat`，
+不能继续在完整响应中搜索任意位置的 `,1` 或 `,5`。
 
-## State Machine
+## 状态机
 
-The recovery service runs from `loop()` and advances through these states:
+恢复服务由 `loop()` 持续驱动，包含以下状态：
 
-| State | Purpose |
+| 状态 | 用途 |
 |---|---|
-| `WAIT_SIM` | Wait for `AT+CPIN?` to report `READY` |
-| `READ_SIM_ID` | Read ICCID and IMSI and load the matching cache entry |
-| `START_AUTO` | Request `AT+COPS=0` |
-| `WAIT_AUTO` | Poll registration while automatic selection runs |
-| `TRY_LAST_GOOD` | Manually select the cached PLMN for this SIM |
-| `SCAN_START` | Start `AT+COPS=?` with a long deadline |
-| `SCAN_WAIT` | Collect and parse the complete scan response |
-| `TRY_CANDIDATE` | Manually try one scanned PLMN |
-| `VERIFY_OPERATOR` | Confirm `CEREG=1/5` and query the selected PLMN |
-| `RETURN_AUTO` | Return to `COPS=0` after recovery and verify stability |
-| `REGISTERED` | Periodically monitor registration health |
-| `BACKOFF` | Stop active recovery until the next bounded retry window |
+| `WAIT_SIM` | 等待 `AT+CPIN?` 返回 `READY` |
+| `READ_SIM_ID` | 读取 ICCID 和 IMSI，并加载对应缓存记录 |
+| `START_AUTO` | 请求 `AT+COPS=0` |
+| `WAIT_AUTO` | 等待自动选网完成并轮询注册状态 |
+| `TRY_LAST_GOOD` | 手动选择该 SIM 缓存的最后成功 PLMN |
+| `SCAN_START` | 启动长命令 `AT+COPS=?` |
+| `SCAN_WAIT` | 收集并解析完整扫描结果 |
+| `TRY_CANDIDATE` | 手动尝试一个扫描候选 PLMN |
+| `VERIFY_OPERATOR` | 确认 `CEREG=1/5` 并查询当前 PLMN |
+| `RETURN_AUTO` | 恢复 `COPS=0` 并验证注册是否稳定 |
+| `REGISTERED` | 已注册状态下周期性检查网络健康状态 |
+| `BACKOFF` | 暂停主动恢复，等待下一次有限重试 |
 
-Only one state may own an active AT transaction. State deadlines use `millis()`
-and must remain safe across wraparound.
+任意时刻最多只有一个状态拥有活动 AT 事务。所有截止时间都使用 `millis()`
+计算，并保证在计数器回绕时仍能正确工作。
 
-## Default Timing
+## 默认时间参数
 
-| Operation | Default |
+| 操作 | 默认值 |
 |---|---:|
-| SIM ready wait | 30 seconds |
-| Initial automatic registration | 120 seconds |
-| Registration polling interval | 5 seconds |
-| Consecutive `CEREG=3` threshold | 3 observations |
-| Operator scan deadline | 180 seconds |
-| Manual operator attempt | 180 seconds per candidate |
-| Post-recovery automatic verification | 30 seconds |
-| Registered health check | 30 seconds |
-| Full recovery backoff | 10 minutes |
+| 等待 SIM Ready | 30 秒 |
+| 首次自动注册 | 120 秒 |
+| 注册状态轮询间隔 | 5 秒 |
+| 连续 `CEREG=3` 阈值 | 3 次 |
+| 运营商扫描截止时间 | 180 秒 |
+| 单个手动运营商尝试 | 每个候选 180 秒 |
+| 恢复自动模式后的验证 | 30 秒 |
+| 已注册状态健康检查 | 30 秒 |
+| 完整恢复失败后的退避 | 10 分钟 |
 
-Timing constants remain compile-time values for the first implementation. They
-are logged when a recovery cycle starts.
+第一版将这些时间作为编译期常量。每次恢复周期开始时在日志中输出相关参数。
 
-## SIM Identity And Persistent Cache
+## SIM 身份与持久化缓存
 
-The cache is keyed by ICCID. If ICCID is unavailable, IMSI is used only for the
-current boot and no persistent record is updated.
+缓存以 ICCID 为主键。如果无法读取 ICCID，只在当前启动周期使用 IMSI，且不写入
+持久化记录。
 
-ESP32 Preferences keys have a short maximum length, so the cache uses a small
-fixed set of records rather than using the full ICCID as a key. Each record stores:
+ESP32 Preferences 的键名长度有限，因此使用固定数量的记录槽，而不是直接将完整
+ICCID 作为键名。每条记录保存：
 
-- Full ICCID.
-- Last successful numeric PLMN.
-- Last successful access technology when available.
+- 完整 ICCID。
+- 最后成功的数字 PLMN。
+- 可获取时保存最后成功的接入技术。
 
-Four records are sufficient for the expected card-swapping workflow. When full,
-new SIM identities replace records in round-robin order. Updating an existing
-ICCID keeps its current slot. No record from one ICCID may be used for another
-ICCID.
+四个记录槽足以覆盖预期的换卡场景。记录槽已满后，新 SIM 身份按照轮转方式覆盖。
+更新已有 ICCID 时继续使用原槽位。任何 ICCID 都不得读取另一张卡的 PLMN 记录。
 
-The cache is updated only after `CEREG=1/5` and a valid numeric operator has been
-confirmed. A failed manual attempt never overwrites a working record.
+只有在确认 `CEREG=1/5` 且成功解析出数字运营商后才更新缓存。失败的手动尝试不得
+覆盖已有的有效记录。
 
-## Determining The Successful PLMN
+## 获取成功注册的 PLMN
 
-After registration succeeds:
+注册成功后执行：
 
-1. Send `AT+COPS=3,2` to request numeric operator formatting.
-2. Query `AT+COPS?`.
-3. Parse the numeric PLMN and access technology.
-4. Save the PLMN for the current ICCID.
+1. 发送 `AT+COPS=3,2`，将运营商输出格式设置为数字格式。
+2. 查询 `AT+COPS?`。
+3. 解析数字 PLMN 和接入技术。
+4. 将 PLMN 保存到当前 ICCID 对应的缓存记录。
 
-Changing the output format must not change the selected operator.
+修改输出格式不能改变当前选中的运营商。
 
-## Candidate Scan And Ordering
+## 扫描结果与候选排序
 
-`AT+COPS=?` may take several minutes. The complete response is collected until a
-final `OK`, `ERROR`, or the 180-second deadline.
+`AT+COPS=?` 可能需要数分钟。恢复事务持续收集响应，直到遇到最终 `OK`、`ERROR`
+或达到 180 秒截止时间。
 
-Each parsed tuple contributes:
+每个有效运营商元组包含：
 
-- Status (`0` unknown, `1` available, `2` current, `3` forbidden).
-- Numeric PLMN.
-- Access technology.
+- 状态：`0` 未知、`1` 可用、`2` 当前、`3` forbidden。
+- 数字 PLMN。
+- 接入技术。
 
-Candidates must be unique by numeric PLMN and access technology. Empty or invalid
-PLMN values are ignored.
+候选项按照数字 PLMN 和接入技术去重。空 PLMN 和非法 PLMN 必须忽略。
 
-Attempt order is:
+尝试顺序如下：
 
-1. Cached last-good PLMN, even if the scan marks it forbidden.
-2. Current operator entries (`stat=2`) if registration was not confirmed.
-3. Available operators (`stat=1`) in scan order.
-4. Forbidden operators (`stat=3`) in scan order.
-5. Unknown operators (`stat=0`) only if all other candidates fail.
+1. 当前 ICCID 缓存的最后成功 PLMN，即使扫描将其标记为 forbidden。
+2. 扫描结果中的当前运营商，即 `stat=2`，但尚未确认注册成功的项目。
+3. 按扫描顺序尝试可用运营商，即 `stat=1`。
+4. 按扫描顺序尝试 forbidden 运营商，即 `stat=3`。
+5. 只有前面全部失败后，才尝试未知运营商，即 `stat=0`。
 
-The state machine tries at most eight unique candidates in one recovery cycle.
-Any PLMN already attempted as the cached last-good operator is not tried twice.
-LTE access technology reported by the scan is preserved in the manual `COPS`
-command. If access technology is missing, selection omits the optional field.
+每个恢复周期最多尝试八个唯一候选。已经作为 last-good 尝试过的 PLMN 不得重复
+尝试。扫描结果包含 LTE 接入技术时，在手动 `COPS` 命令中保留该值；没有接入技术
+时省略可选字段。
 
-## Manual Attempt And Return To Automatic Mode
+## 手动尝试与恢复自动模式
 
-A manual attempt sends a numeric selection command equivalent to:
+手动尝试使用数字运营商命令：
 
 ```text
 AT+COPS=1,2,"<plmn>",<act>
 ```
 
-The transaction waits for its final result and then verifies registration with
-`AT+CEREG?`. A command timeout is not treated as success merely because bytes were
-received.
+事务等待最终结果，然后通过 `AT+CEREG?` 验证注册状态。仅收到部分字节或命令超时
+不能判定为成功。
 
-After a successful manual recovery:
+手动恢复成功后：
 
-1. Save the confirmed operator for the current ICCID.
-2. Wait 5 seconds for the registration to stabilize.
-3. Send `AT+COPS=0`.
-4. Verify `CEREG=1/5` for 30 seconds.
+1. 保存当前 ICCID 已确认成功的运营商。
+2. 等待 5 秒，使注册状态稳定。
+3. 发送 `AT+COPS=0`。
+4. 在 30 秒内持续确认 `CEREG=1/5`。
 
-If returning to automatic mode loses registration, manually reconnect the saved
-PLMN and keep manual mode for the remainder of the current boot. The next cold
-start still begins with automatic selection.
+如果恢复自动模式后丢失注册，则重新手动连接已保存的 PLMN，并在当前启动周期保持
+手动模式。下一次冷启动仍从自动选网开始。
 
-## Serial Ownership And URC Handling
+## 串口所有权与 URC 处理
 
-Long recovery commands must not share `Serial1` with another command reader.
+长时间恢复命令不能与其他 `Serial1` 读取器并行运行。
 
-- A global modem-I/O ownership flag identifies an active recovery transaction.
-- Web AT commands and diagnostic queries return a busy response while recovery
-  owns the port.
-- The normal loop does not call the generic serial-line reader while recovery
-  owns the port.
-- Recovery parsing recognizes unsolicited lines separately from command response
-  lines.
-- `+CMT:` and its following PDU are forwarded to the existing SMS pipeline rather
-  than appended to a `COPS` response or discarded.
-- A transaction consumes its complete final response so trailing `OK` bytes cannot
-  contaminate the next command.
+- 使用全局模组 I/O 所有权标志表示当前存在恢复事务。
+- 恢复事务占用串口时，网页 AT 命令和网络诊断返回明确的忙碌响应。
+- 恢复事务占用串口时，普通主循环不得调用通用串口行读取器。
+- 恢复解析器必须区分非请求上报行和命令响应行。
+- `+CMT:` 及其后续 PDU 必须转发给现有短信处理流程，不能追加到 `COPS` 响应或丢弃。
+- 每个事务必须消费完整最终响应，避免残留的 `OK` 污染下一条命令。
 
-The existing SMS line state is moved behind a function that can accept a complete
-line from either the normal URC reader or the recovery transaction reader.
+现有短信行解析状态需要封装为一个可接收完整行的函数，使普通 URC 读取器和恢复事务
+读取器都能复用同一处理入口。
 
-## Runtime Monitoring
+## 运行时监控
 
-While registered, the service queries `CEREG` every 30 seconds. One failed query
-does not start recovery. A non-registered result moves the state machine into a
-new 120-second automatic reacquisition window. Candidate recovery begins when:
+注册成功后，每 30 秒查询一次 `CEREG`。一次失败查询不能直接启动恢复。出现未注册
+结果时，状态机进入新的 120 秒自动重连窗口。满足以下任一条件后启动候选恢复：
 
-- `CEREG=3` is observed three consecutive times, or
-- registration remains unsuccessful for that automatic registration deadline.
+- 连续三次观察到 `CEREG=3`。
+- 在本次自动重连截止时间内始终没有恢复注册。
 
-`modemReady` is updated from the latest confirmed state instead of remaining an
-initialization-only value.
+`modemReady` 根据最近一次确认的注册状态实时更新，不再只保留初始化时的结果。
 
-## Failure And Backoff
+## 失败处理与退避
 
-If the cached PLMN and all scanned candidates fail:
+缓存 PLMN 和所有扫描候选全部失败后：
 
-1. Request `AT+COPS=0`.
-2. Mark `modemReady=false`.
-3. Log a summary of attempted PLMNs and results.
-4. Enter a 10-minute backoff.
-5. Start a new automatic recovery cycle after backoff.
+1. 请求 `AT+COPS=0`。
+2. 设置 `modemReady=false`。
+3. 记录本轮尝试过的 PLMN 及结果摘要。
+4. 进入 10 分钟退避状态。
+5. 退避结束后重新开始自动恢复周期。
 
-The recovery path does not automatically hard-reset the ESP32 or repeatedly toggle
-`CFUN`. Radio or module reset remains a later diagnostic action, not the first
-response to a policy rejection.
+恢复流程不会自动硬重启 ESP32，也不会反复切换 `CFUN`。射频或模组重启只作为后续
+诊断手段，不能作为网络策略拒绝后的首选处理方式。
 
-## Logging And Web Behavior
+## 日志与网页行为
 
-Logs include:
+日志需要包含：
 
-- Parsed SIM identity with ICCID partially masked.
-- Registration state transitions.
-- Automatic-registration deadline and denial count.
-- Cache hit or miss.
-- Scan start, completion, tuple count, and parse errors.
-- Each attempted PLMN, status, access technology, and outcome.
-- Whether automatic mode remained stable after recovery.
-- Backoff start and next retry time.
+- 经过部分掩码处理的 SIM 身份信息。
+- 注册状态转换。
+- 自动注册截止时间和连续拒绝次数。
+- ICCID 缓存命中或未命中。
+- 扫描开始、完成、元组数量和解析错误。
+- 每次尝试的 PLMN、状态、接入技术和结果。
+- 手动恢复后自动模式是否保持稳定。
+- 退避开始时间和下次重试时间。
 
-Sensitive identifiers are not printed in full in routine logs. The web overview
-continues to show `modemReady`, now backed by periodic registration checks. Web AT
-and network diagnostic actions report a clear busy error during recovery instead
-of competing for the serial port.
+常规日志不得输出完整敏感标识。网页概览继续显示 `modemReady`，但其值改为来自周期性
+注册检查。恢复期间，网页 AT 和网络诊断操作返回明确的忙碌错误，不能与恢复流程争用
+串口。
 
-## Testing Strategy
+## 测试策略
 
-Host-side tests cover pure parsing and ordering logic:
+主机侧测试覆盖纯解析与排序逻辑：
 
-- `CEREG` responses for states `0` through `5`.
-- Extended `CEREG` responses containing additional commas and numeric fields.
-- The observed `COPS=?` response containing available and forbidden operators.
-- Duplicate PLMN removal and candidate ordering.
-- Cache lookup, update, and round-robin replacement.
-- Malformed and partial modem responses.
+- `CEREG` 状态 `0` 到 `5`。
+- 包含额外逗号和数字字段的扩展 `CEREG` 响应。
+- 本次实际出现的、同时包含 available 和 forbidden 运营商的 `COPS=?` 响应。
+- 重复 PLMN 去重和候选排序。
+- 缓存查找、更新和轮转覆盖。
+- 畸形响应和不完整响应。
 
-Firmware compilation uses the existing Arduino CLI workflow and both project FQBNs
-already documented in the repository.
+固件编译使用仓库现有 Arduino CLI 工作流，并验证仓库中已经记录的两个项目 FQBN。
 
-Hardware verification covers:
+硬件验证覆盖：
 
-1. Normal automatic registration without invoking recovery.
-2. Known ICCID: automatic failure followed by last-good recovery.
-3. New ICCID: scan followed by candidate attempts.
-4. A forbidden candidate that succeeds manually.
-5. All candidates failing and entering backoff.
-6. Returning to automatic mode after manual recovery.
-7. A `+CMT` arriving immediately after operator registration.
-8. Web access and busy responses during a long scan.
-9. Cold restart after successful recovery.
-10. Swapping to a different SIM without reusing the previous SIM's PLMN.
+1. 正常自动注册，不触发恢复流程。
+2. 已知 ICCID 自动失败后，通过 last-good 恢复。
+3. 新 ICCID 无缓存记录，通过扫描和候选尝试恢复。
+4. 扫描中标记为 forbidden 的候选通过手动模式注册成功。
+5. 所有候选失败后进入退避。
+6. 手动恢复成功后重新切回自动模式。
+7. 运营商注册完成后立即到达 `+CMT`，短信不能丢失。
+8. 长时间扫描期间网页保持可访问，并正确返回串口忙碌状态。
+9. 恢复成功后进行冷启动验证。
+10. 更换另一张 SIM 时不能复用上一张 SIM 的 PLMN。
 
-## Rollout
+## 发布方式
 
-The first release keeps all recovery timings as constants and exposes detailed
-logs. Raw `EF_FPLMN` modification is deliberately excluded. If field logs show
-that operator-specific configuration is still needed, a later change can expose
-per-ICCID preferred PLMNs in the web UI without changing the recovery state
-machine.
+第一版使用固定恢复时间参数并输出详细日志，不修改 `EF_FPLMN`。如果实际运行日志表明
+仍需要运营商专用配置，后续可以在网页中增加按 ICCID 配置首选 PLMN 的能力，而无需
+修改网络恢复状态机的核心流程。
