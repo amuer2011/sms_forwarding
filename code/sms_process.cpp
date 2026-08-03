@@ -18,6 +18,7 @@ struct PendingSms {
 PendingSms pendingSms[MAX_PENDING_SMS];
 uint8_t pendingSmsCount = 0;
 unsigned long lastPendingRetry = 0;
+ModemLineAssembler modemLineAssembler = {};
 
 void persistPendingSmsQueue() {
   Preferences pendingPreferences;
@@ -228,24 +229,29 @@ void checkConcatTimeout() {
 
 // 读取串口一行（含回车换行），返回行字符串，无新行时返回空
 String readSerialLine(HardwareSerial& port) {
-  static char lineBuf[SERIAL_BUFFER_SIZE];
-  static int linePos = 0;
+  String result;
+  return readSerialLineLimited(port, &result, SERIAL_BUFFER_SIZE) ? result : "";
+}
 
-  while (port.available()) {
-    char c = port.read();
-    if (c == '\n') {
-      lineBuf[linePos] = 0;
-      String res = String(lineBuf);
-      linePos = 0;
-      return res;
-    } else if (c != '\r') {  // 跳过\r
-      if (linePos < SERIAL_BUFFER_SIZE - 1)
-        lineBuf[linePos++] = c;
-      else
-        linePos = 0;  //超长报错保护，重头计
-    }
+bool readSerialLineLimited(HardwareSerial& port,
+                           String* result,
+                           uint16_t maxBytes,
+                           CopsScanParser* scanParser) {
+  if (result == nullptr || maxBytes == 0) return false;
+  *result = "";
+
+  uint16_t bytesRead = 0;
+  while (port.available() && bytesRead < maxBytes) {
+    char value = static_cast<char>(port.read());
+    bytesRead++;
+    if (scanParser != nullptr) feedCopsScanParser(scanParser, value);
+    if (!feedModemLineAssembler(&modemLineAssembler, value)) continue;
+
+    *result = String(modemLineAssembler.buffer);
+    resetModemLineAssembler(&modemLineAssembler);
+    return true;
   }
-  return "";
+  return false;
 }
 
 // 检查字符串是否为有效的十六进制PDU数据

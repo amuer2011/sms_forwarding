@@ -27,6 +27,14 @@ enum ModemIoOwner : uint8_t {
   MODEM_IO_SMS = 3
 };
 
+constexpr uint16_t MODEM_LINE_CAPACITY = 500;
+
+struct ModemLineAssembler {
+  uint16_t length;
+  bool overflow;
+  char buffer[MODEM_LINE_CAPACITY];
+};
+
 constexpr uint8_t MAX_SCANNED_OPERATORS = 12;
 
 struct CopsScanParser {
@@ -38,6 +46,7 @@ struct CopsScanParser {
 };
 
 RegState parseCeregState(const char* response);
+bool isRegisteredState(RegState state);
 bool parseCurrentOperator(const char* response, OperatorCandidate* result);
 void resetCopsScanParser(CopsScanParser* parser);
 void feedCopsScanParser(CopsScanParser* parser, char value);
@@ -49,5 +58,7 @@ bool shouldTryLastGood(uint8_t failCount);
 uint8_t incrementFailureCount(uint8_t failCount);
 bool acquireModemIoOwner(ModemIoOwner* current, ModemIoOwner requested);
 bool releaseModemIoOwner(ModemIoOwner* current, ModemIoOwner requested);
+void resetModemLineAssembler(ModemLineAssembler* assembler);
+bool feedModemLineAssembler(ModemLineAssembler* assembler, char value);
 
 #endif

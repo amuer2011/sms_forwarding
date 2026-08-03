@@ -10,6 +10,9 @@ static void testCeregParsing() {
   assert(parseCeregState("+CEREG: 0\r\nOK\r\n") == REG_PARSE_UNKNOWN);
   assert(parseCeregState("+CEREG:\r\nOK\r\n") == REG_PARSE_UNKNOWN);
   assert(parseCeregState("") == REG_PARSE_UNKNOWN);
+  assert(isRegisteredState(REG_HOME));
+  assert(isRegisteredState(REG_ROAMING));
+  assert(!isRegisteredState(REG_DENIED));
 }
 
 static void testCurrentOperatorParsing() {
@@ -60,11 +63,24 @@ static void testModemIoOwnership() {
   assert(owner == MODEM_IO_NONE);
 }
 
+static void testModemLineAssemblyAcrossServiceCalls() {
+  ModemLineAssembler assembler = {};
+  assert(!feedModemLineAssembler(&assembler, '+'));
+  assert(!feedModemLineAssembler(&assembler, 'O'));
+  assert(!feedModemLineAssembler(&assembler, 'K'));
+  assert(!feedModemLineAssembler(&assembler, '\r'));
+  assert(feedModemLineAssembler(&assembler, '\n'));
+  assert(strcmp(assembler.buffer, "+OK") == 0);
+  resetModemLineAssembler(&assembler);
+  assert(assembler.length == 0);
+}
+
 int main() {
   testCeregParsing();
   testCurrentOperatorParsing();
   testCopsScanOrdering();
   testLastGoodFailureThreshold();
   testModemIoOwnership();
+  testModemLineAssemblyAcrossServiceCalls();
   return 0;
 }

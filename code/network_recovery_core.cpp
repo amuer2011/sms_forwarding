@@ -157,6 +157,10 @@ RegState parseCeregState(const char* response) {
   return static_cast<RegState>(state);
 }
 
+bool isRegisteredState(RegState state) {
+  return state == REG_HOME || state == REG_ROAMING;
+}
+
 bool parseCurrentOperator(const char* response, OperatorCandidate* result) {
   if (response == nullptr || result == nullptr) {
     return false;
@@ -316,4 +320,40 @@ bool releaseModemIoOwner(ModemIoOwner* current, ModemIoOwner requested) {
   }
   *current = MODEM_IO_NONE;
   return true;
+}
+
+void resetModemLineAssembler(ModemLineAssembler* assembler) {
+  if (assembler == nullptr) {
+    return;
+  }
+  assembler->length = 0;
+  assembler->overflow = false;
+  assembler->buffer[0] = '\0';
+}
+
+bool feedModemLineAssembler(ModemLineAssembler* assembler, char value) {
+  if (assembler == nullptr || value == '\r') {
+    return false;
+  }
+
+  if (value == '\n') {
+    if (assembler->overflow) {
+      assembler->buffer[0] = '\0';
+    } else {
+      assembler->buffer[assembler->length] = '\0';
+    }
+    return true;
+  }
+
+  if (assembler->overflow) {
+    return false;
+  }
+  if (assembler->length >= MODEM_LINE_CAPACITY - 1) {
+    assembler->overflow = true;
+    assembler->length = 0;
+    return false;
+  }
+
+  assembler->buffer[assembler->length++] = value;
+  return false;
 }

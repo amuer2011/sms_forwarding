@@ -1,4 +1,5 @@
 #include "modem.h"
+#include "network_recovery.h"
 #include "sms_process.h"
 #include "web_handlers.h"
 
@@ -87,6 +88,9 @@ void resetModule() {
 
 // 模组 AT 初始化流程（setup 中调用，resetModule 后也调用）
 void modemInit() {
+  resetNetworkRecovery();
+  modemReady = false;
+
   // 清掉上电噪声/残留
   while (Serial1.available()) Serial1.read();
 
@@ -145,19 +149,7 @@ void modemInit() {
     blink_short();
   }
   logCaptureLn(String("PDU模式设置完成"));
-  int ceregRetry = 0;
-  while (!waitCEREG() && ceregRetry < 30) {
-    logCaptureLn(String("等待网络注册..."));
-    ceregRetry++;
-    blink_short();
-  }
-  if (ceregRetry < 30) {
-    logCaptureLn(String("网络已注册"));
-    modemReady = true;
-  } else {
-    logCaptureLn(String("⚠️ 网络注册超时（无SIM卡或信号差），模组功能不可用"));
-    modemReady = false;
-  }
+  beginNetworkRecovery();
 }
 
 void blink_short(unsigned long gap_time) {
