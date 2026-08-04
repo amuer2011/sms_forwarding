@@ -2,7 +2,6 @@
 #define SMS_PROCESS_H
 
 #include "globals.h"
-#include "network_recovery_core.h"
 
 void initConcatBuffer();
 void initPendingSmsQueue();
@@ -12,17 +11,11 @@ String assembleConcatSms(int slot);
 void clearConcatSlot(int slot);
 void checkConcatTimeout();
 String readSerialLine(HardwareSerial& port);
-bool readSerialLineLimited(HardwareSerial& port,
-                           String* result,
-                           uint16_t maxBytes,
-                           CopsScanParser* scanParser = nullptr);
-bool feedModemInputChar(char value, String* completedLine);
 bool isHexString(const String& str);
 bool isInNumberBlackList(const char* sender);
 bool isAdmin(const char* sender);
 void processAdminCommand(const char* sender, const char* text);
 void processSmsContent(const char* sender, const char* text, const char* timestamp);
-bool processModemUrcLine(const String& line);
 void checkSerial1URC();
 
 #endif

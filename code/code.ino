@@ -4,7 +4,6 @@
 #include "web_handlers.h"
 #include "web_handlers.h"
 #include "modem.h"
-#include "network_recovery.h"
 #include "web_handlers.h"
 #include "push.h"
 #include "web_handlers.h"
@@ -120,14 +119,6 @@ void loop() {
   }
   checkConcatTimeout();
   processPendingSmsQueue();
-  serviceNetworkRecovery();
-  if (Serial.available()) {
-    if (modemIoBusy()) {
-      while (Serial.available()) Serial.read();
-      logCaptureLn(String("模组正在恢复网络，已忽略串口透传输入"));
-    } else {
-      Serial1.write(Serial.read());
-    }
-  }
+  if (Serial.available()) Serial1.write(Serial.read());
   checkSerial1URC();
 }

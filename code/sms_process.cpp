@@ -18,7 +18,6 @@ struct PendingSms {
 PendingSms pendingSms[MAX_PENDING_SMS];
 uint8_t pendingSmsCount = 0;
 unsigned long lastPendingRetry = 0;
-ModemLineAssembler modemLineAssembler = {};
 
 void persistPendingSmsQueue() {
   Preferences pendingPreferences;
@@ -229,35 +228,24 @@ void checkConcatTimeout() {
 
 // 读取串口一行（含回车换行），返回行字符串，无新行时返回空
 String readSerialLine(HardwareSerial& port) {
-  String result;
-  return readSerialLineLimited(port, &result, SERIAL_BUFFER_SIZE) ? result : "";
-}
+  static char lineBuf[SERIAL_BUFFER_SIZE];
+  static int linePos = 0;
 
-bool readSerialLineLimited(HardwareSerial& port,
-                           String* result,
-                           uint16_t maxBytes,
-                           CopsScanParser* scanParser) {
-  if (result == nullptr || maxBytes == 0) return false;
-  *result = "";
-
-  uint16_t bytesRead = 0;
-  while (port.available() && bytesRead < maxBytes) {
-    char value = static_cast<char>(port.read());
-    bytesRead++;
-    if (scanParser != nullptr) feedCopsScanParser(scanParser, value);
-    if (feedModemInputChar(value, result)) return true;
+  while (port.available()) {
+    char c = port.read();
+    if (c == '\n') {
+      lineBuf[linePos] = 0;
+      String res = String(lineBuf);
+      linePos = 0;
+      return res;
+    } else if (c != '\r') {  // 跳过\r
+      if (linePos < SERIAL_BUFFER_SIZE - 1)
+        lineBuf[linePos++] = c;
+      else
+        linePos = 0;  //超长报错保护，重头计
+    }
   }
-  return false;
-}
-
-bool feedModemInputChar(char value, String* completedLine) {
-  if (completedLine == nullptr ||
-      !feedModemLineAssembler(&modemLineAssembler, value)) {
-    return false;
-  }
-  *completedLine = String(modemLineAssembler.buffer);
-  resetModemLineAssembler(&modemLineAssembler);
-  return true;
+  return "";
 }
 
 // 检查字符串是否为有效的十六进制PDU数据
@@ -413,95 +401,111 @@ void processSmsContent(const char* sender, const char* text, const char* timesta
   sendSmsNotifications(sender, text, timestamp);
 }
 
-// 处理完整的模组行。短信行由任意当前串口事务转交到这里。
-bool processModemUrcLine(const String& rawLine) {
-  static enum { IDLE, WAIT_PDU } state = IDLE;
-  static unsigned long pduWaitStarted = 0;
-  constexpr unsigned long PDU_WAIT_TIMEOUT_MS = 5000;
-
-  String line = rawLine;
-  line.trim();
-  if (state == WAIT_PDU && millis() - pduWaitStarted >= PDU_WAIT_TIMEOUT_MS) {
-    logCaptureLn(String("等待短信PDU超时，恢复普通串口解析"));
-    state = IDLE;
-  }
-
-  if (line.startsWith("+CMT:")) {
-    logCaptureLn(String("Debug> " + line));
-    logCaptureLn(String("检测到+CMT，等待PDU数据..."));
-    state = WAIT_PDU;
-    pduWaitStarted = millis();
-    return true;
-  }
-
-  if (state != WAIT_PDU || !isHexString(line)) {
-    return false;
-  }
-
-  logCaptureLn(String("Debug> " + line));
-  logCaptureLn(String("收到PDU数据: " + line));
-  logCaptureLn(String("PDU长度: " + String(line.length()) + " 字符"));
-
-  if (!pdu.decodePDU(line.c_str())) {
-    logCaptureLn(String("❌ PDU解析失败！"));
-  } else {
-    logCaptureLn(String("✓ PDU解析成功"));
-    logCaptureLn(String("=== 短信内容 ==="));
-    logCaptureLn(String("发送者: " + String(pdu.getSender())));
-    logCaptureLn(String("时间戳: " + String(pdu.getTimeStamp())));
-    logCaptureLn(String("内容: " + String(pdu.getText())));
-
-    int* concatInfo = pdu.getConcatInfo();
-    int refNumber = concatInfo[0];
-    int partNumber = concatInfo[1];
-    int totalParts = concatInfo[2];
-
-    logCaptureF("长短信信息: 参考号=%d, 当前=%d, 总计=%d\n",
-                refNumber, partNumber, totalParts);
-    logCaptureLn(String("==============="));
-
-    if (totalParts > 1 && partNumber > 0) {
-      logCaptureF("📧 收到长短信分段 %d/%d\n", partNumber, totalParts);
-      int slot = findOrCreateConcatSlot(refNumber, pdu.getSender(), totalParts);
-      int partIndex = partNumber - 1;
-      if (partIndex >= 0 && partIndex < MAX_CONCAT_PARTS) {
-        if (!concatBuffer[slot].parts[partIndex].valid) {
-          concatBuffer[slot].parts[partIndex].valid = true;
-          concatBuffer[slot].parts[partIndex].text = String(pdu.getText());
-          concatBuffer[slot].receivedParts++;
-          if (concatBuffer[slot].receivedParts == 1) {
-            concatBuffer[slot].timestamp = String(pdu.getTimeStamp());
-          }
-          logCaptureF("  已缓存分段 %d，当前已收到 %d/%d\n",
-                      partNumber, concatBuffer[slot].receivedParts,
-                      totalParts);
-        } else {
-          logCaptureF("  ⚠️ 分段 %d 已存在，跳过\n", partNumber);
-        }
-      }
-
-      if (concatBuffer[slot].receivedParts >= totalParts) {
-        logCaptureLn(String("✅ 长短信已收齐，开始合并转发"));
-        String fullText = assembleConcatSms(slot);
-        processSmsContent(concatBuffer[slot].sender.c_str(), fullText.c_str(),
-                          concatBuffer[slot].timestamp.c_str());
-        clearConcatSlot(slot);
-      }
-    } else {
-      processSmsContent(pdu.getSender(), pdu.getText(), pdu.getTimeStamp());
-    }
-  }
-
-  state = IDLE;
-  return true;
-}
-
+// 处理URC和PDU
 void checkSerial1URC() {
-  if (modemIoBusy() || !acquireModemIo(MODEM_IO_SMS)) return;
+  static enum { IDLE,
+                WAIT_PDU } state = IDLE;
 
   String line = readSerialLine(Serial1);
-  if (line.length() > 0 && !processModemUrcLine(line)) {
-    logCaptureLn(String("Debug> " + line));
+  if (line.length() == 0) return;
+
+  // 打印到调试串口
+  logCaptureLn(String("Debug> " + line));
+
+  if (state == IDLE) {
+    // 检测到短信上报URC头
+    if (line.startsWith("+CMT:")) {
+      logCaptureLn(String("检测到+CMT，等待PDU数据..."));
+      state = WAIT_PDU;
+    }
+  } else if (state == WAIT_PDU) {
+    // 跳过空行
+    if (line.length() == 0) {
+      return;
+    }
+    
+    // 如果是十六进制字符串，认为是PDU数据
+    if (isHexString(line)) {
+      logCaptureLn(String("收到PDU数据: " + line));
+      logCaptureLn(String("PDU长度: " + String(line.length()) + " 字符"));
+      
+      // 解析PDU
+      if (!pdu.decodePDU(line.c_str())) {
+        logCaptureLn(String("❌ PDU解析失败！"));
+      } else {
+        logCaptureLn(String("✓ PDU解析成功"));
+        logCaptureLn(String("=== 短信内容 ==="));
+        logCaptureLn(String("发送者: " + String(pdu.getSender())));
+        logCaptureLn(String("时间戳: " + String(pdu.getTimeStamp())));
+        logCaptureLn(String("内容: " + String(pdu.getText())));
+        
+        // 获取长短信信息
+        int* concatInfo = pdu.getConcatInfo();
+        int refNumber = concatInfo[0];
+        int partNumber = concatInfo[1];
+        int totalParts = concatInfo[2];
+        
+        logCaptureF("长短信信息: 参考号=%d, 当前=%d, 总计=%d\n", refNumber, partNumber, totalParts);
+        logCaptureLn(String("==============="));
+
+        // 判断是否为长短信
+        if (totalParts > 1 && partNumber > 0) {
+          // 这是长短信的一部分
+          logCaptureF("📧 收到长短信分段 %d/%d\n", partNumber, totalParts);
+          
+          // 查找或创建缓存槽位
+          int slot = findOrCreateConcatSlot(refNumber, pdu.getSender(), totalParts);
+          
+          // 存储该分段（partNumber从1开始，数组从0开始）
+          int partIndex = partNumber - 1;
+          if (partIndex >= 0 && partIndex < MAX_CONCAT_PARTS) {
+            if (!concatBuffer[slot].parts[partIndex].valid) {
+              concatBuffer[slot].parts[partIndex].valid = true;
+              concatBuffer[slot].parts[partIndex].text = String(pdu.getText());
+              concatBuffer[slot].receivedParts++;
+              
+              // 如果是第一个收到的分段，保存时间戳
+              if (concatBuffer[slot].receivedParts == 1) {
+                concatBuffer[slot].timestamp = String(pdu.getTimeStamp());
+              }
+              
+              logCaptureF("  已缓存分段 %d，当前已收到 %d/%d\n", 
+                           partNumber, 
+                           concatBuffer[slot].receivedParts, 
+                           totalParts);
+            } else {
+              logCaptureF("  ⚠️ 分段 %d 已存在，跳过\n", partNumber);
+            }
+          }
+          
+          // 检查是否已收齐所有分段
+          if (concatBuffer[slot].receivedParts >= totalParts) {
+            logCaptureLn(String("✅ 长短信已收齐，开始合并转发"));
+            
+            // 合并所有分段
+            String fullText = assembleConcatSms(slot);
+            
+            // 处理完整短信
+            processSmsContent(concatBuffer[slot].sender.c_str(), 
+                             fullText.c_str(), 
+                             concatBuffer[slot].timestamp.c_str());
+            
+            // 清空槽位
+            clearConcatSlot(slot);
+          }
+        } else {
+          // 普通短信，直接处理
+          processSmsContent(pdu.getSender(), pdu.getText(), pdu.getTimeStamp());
+        }
+      }
+      
+      // 返回IDLE状态
+      state = IDLE;
+    } 
+    // 如果是其他内容（OK、ERROR等），也返回IDLE
+    else {
+      logCaptureLn(String("收到非PDU数据，返回IDLE状态"));
+      state = IDLE;
+    }
   }
-  releaseModemIo(MODEM_IO_SMS);
 }
