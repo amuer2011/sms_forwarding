@@ -35,6 +35,15 @@
    ├── sendATandWaitOK("AT+CMGF=0", 1000)                   // PDU模式
    └── waitCEREG()                                           // 等网络注册
 
+### 每卡网络恢复验收
+
+| 初始条件 | 期望 AT 顺序 | 成功判定 |
+|---|---|---|
+| 自动注册成功 | `CEREG?` | `CEREG=1/5` 后 `COPS?` 保存 |
+| 自动失败且命中 last-good | `COPS=1,2,"last-good",7` -> `CEREG?` | `CEREG=1/5` |
+| 无记录或 last-good 失败 | `COPS=?` -> 逐个 `COPS=1,2,"PLMN",7` -> `CEREG?` | 首个 `CEREG=1/5` |
+| 所有候选失败 | `COPS=0` | `modemReady=false` |
+
 6. WiFi 连接
    ├── WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN)             // 扫描全部信道
    └── WiFi.begin(SSID, PASS, 0, nullptr, true)              // 支持隐藏SSID

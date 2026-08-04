@@ -1,5 +1,185 @@
 #include "modem.h"
 #include "web_handlers.h"
+#include "network_recovery.h"
+
+#include <string.h>
+#include <time.h>
+
+namespace {
+
+constexpr uint32_t SIM_NETWORK_CACHE_MAGIC = 0x534E4331UL;
+constexpr const char* SIM_NETWORK_NAMESPACE = "sim_network";
+constexpr const char* SIM_NETWORK_CACHE_KEY = "records";
+constexpr unsigned long AUTO_REGISTER_TIMEOUT_MS = 120000;
+constexpr unsigned long MANUAL_REGISTER_TIMEOUT_MS = 45000;
+constexpr unsigned long COPS_SCAN_TIMEOUT_MS = 180000;
+
+struct SimNetworkCache {
+  uint32_t magic;
+  SimNetworkRecord records[MAX_SIM_NETWORK_RECORDS];
+};
+
+void resetSimNetworkCache(SimNetworkCache& cache) {
+  memset(&cache, 0, sizeof(cache));
+  cache.magic = SIM_NETWORK_CACHE_MAGIC;
+}
+
+bool loadSimNetworkCache(SimNetworkCache& cache) {
+  resetSimNetworkCache(cache);
+  Preferences storage;
+  if (!storage.begin(SIM_NETWORK_NAMESPACE, true)) return false;
+
+  const bool valid = storage.getBytesLength(SIM_NETWORK_CACHE_KEY) == sizeof(cache) &&
+                     storage.getBytes(SIM_NETWORK_CACHE_KEY, &cache, sizeof(cache)) == sizeof(cache) &&
+                     cache.magic == SIM_NETWORK_CACHE_MAGIC;
+  storage.end();
+  if (!valid) resetSimNetworkCache(cache);
+  return valid;
+}
+
+bool saveSimNetworkCache(const SimNetworkCache& cache) {
+  Preferences storage;
+  if (!storage.begin(SIM_NETWORK_NAMESPACE, false)) {
+    logCaptureLn(String("⚠️ last-good缓存写入失败"));
+    return false;
+  }
+  const bool saved = storage.putBytes(SIM_NETWORK_CACHE_KEY, &cache, sizeof(cache)) == sizeof(cache);
+  storage.end();
+  if (!saved) logCaptureLn(String("⚠️ last-good缓存写入不完整"));
+  return saved;
+}
+
+void copyIdentity(char* target, size_t capacity, const String& source) {
+  if (capacity == 0) return;
+  size_t length = source.length();
+  if (length >= capacity) length = capacity - 1;
+  memcpy(target, source.c_str(), length);
+  target[length] = '\0';
+}
+
+String extractLongestDigits(const String& response, uint8_t minimumLength, uint8_t maximumLength) {
+  int bestStart = -1;
+  int bestLength = 0;
+  int runStart = -1;
+  for (int i = 0; i <= response.length(); ++i) {
+    const bool digit = i < response.length() &&
+                       response.charAt(i) >= '0' && response.charAt(i) <= '9';
+    if (digit && runStart < 0) runStart = i;
+    if (!digit && runStart >= 0) {
+      const int runLength = i - runStart;
+      if (runLength >= minimumLength && runLength <= maximumLength && runLength > bestLength) {
+        bestStart = runStart;
+        bestLength = runLength;
+      }
+      runStart = -1;
+    }
+  }
+  return bestStart >= 0 ? response.substring(bestStart, bestStart + bestLength) : "";
+}
+
+String queryIccid() {
+  return extractLongestDigits(sendATCommand("AT+ICCID", 3000), 15, 22);
+}
+
+String queryImsi() {
+  return extractLongestDigits(sendATCommand("AT+CIMI", 3000), 15, 15);
+}
+
+void waitWithWebServer(unsigned long duration) {
+  const unsigned long start = millis();
+  while (millis() - start < duration) {
+    server.handleClient();
+    delay(10);
+  }
+}
+
+bool waitForCeregSuccess(unsigned long timeoutMs) {
+  const unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    if (waitCEREG()) return true;
+    waitWithWebServer(1000);
+  }
+  return false;
+}
+
+bool saveCurrentNetwork(const String& iccid, const String& imsi) {
+  if (iccid.length() == 0 && imsi.length() == 0) return false;
+
+  if (!sendATandWaitOK("AT+COPS=3,2", 3000)) {
+    logCaptureLn(String("⚠️ 无法切换数字运营商格式，未保存last-good"));
+    return false;
+  }
+
+  const String response = sendATCommand("AT+COPS?", 3000);
+  char plmn[SIM_NETWORK_PLMN_LENGTH] = {};
+  uint8_t act = 0;
+  if (!extractCurrentCops(response.c_str(), plmn, &act)) {
+    logCaptureLn(String("⚠️ 未获取到当前数字运营商，未保存last-good"));
+    return false;
+  }
+
+  SimNetworkCache cache;
+  loadSimNetworkCache(cache);
+  int slot = findSimNetworkRecord(cache.records, iccid.c_str(), imsi.c_str());
+  if (slot < 0) slot = selectSimNetworkRecordSlot(cache.records);
+
+  SimNetworkRecord& record = cache.records[slot];
+  memset(&record, 0, sizeof(record));
+  copyIdentity(record.iccid, sizeof(record.iccid), iccid);
+  copyIdentity(record.imsi, sizeof(record.imsi), imsi);
+  memcpy(record.plmn, plmn, sizeof(record.plmn));
+  record.act = act;
+  const time_t now = time(nullptr);
+  record.lastSuccessTime = now > 0 ? static_cast<uint32_t>(now) : millis() / 1000;
+  if (!saveSimNetworkCache(cache)) return false;
+  logCaptureLn(String("已保存SIM last-good运营商: ") + String(plmn));
+  return true;
+}
+
+bool tryManualNetwork(const char* plmn, const String& iccid, const String& imsi) {
+  String command = "AT+COPS=1,2,\"";
+  command += plmn;
+  command += "\",7";
+  logCaptureLn(String("尝试运营商: ") + String(plmn));
+  if (!sendATandWaitOK(command.c_str(), 10000)) {
+    logCaptureLn(String("运营商选择命令未确认，继续等待注册状态: ") + String(plmn));
+  }
+  if (!waitForCeregSuccess(MANUAL_REGISTER_TIMEOUT_MS)) {
+    logCaptureLn(String("运营商注册失败: ") + String(plmn));
+    return false;
+  }
+  saveCurrentNetwork(iccid, imsi);
+  return true;
+}
+
+bool recoverNetwork(const String& iccid, const String& imsi) {
+  SimNetworkCache cache;
+  loadSimNetworkCache(cache);
+  const int cachedSlot = findSimNetworkRecord(cache.records, iccid.c_str(), imsi.c_str());
+  const char* lastGood = cachedSlot >= 0 ? cache.records[cachedSlot].plmn : "";
+
+  if (lastGood[0] != '\0') {
+    logCaptureLn(String("自动注册失败，尝试SIM对应的last-good运营商: ") + String(lastGood));
+    if (tryManualNetwork(lastGood, iccid, imsi)) return true;
+  } else {
+    logCaptureLn(String("自动注册失败，当前SIM没有last-good记录"));
+  }
+
+  logCaptureLn(String("开始扫描运营商候选..."));
+  const String scanResponse = sendATCommand("AT+COPS=?", COPS_SCAN_TIMEOUT_MS);
+  char candidates[MAX_COPS_CANDIDATES][SIM_NETWORK_PLMN_LENGTH] = {};
+  const uint8_t count = extractCopsCandidates(scanResponse.c_str(), candidates, MAX_COPS_CANDIDATES);
+  for (uint8_t i = 0; i < count; ++i) {
+    if (lastGood[0] != '\0' && strcmp(candidates[i], lastGood) == 0) continue;
+    if (tryManualNetwork(candidates[i], iccid, imsi)) return true;
+  }
+
+  logCaptureLn(String("⚠️ 所有候选运营商注册失败，恢复自动选网"));
+  sendATandWaitOK("AT+COPS=0", 10000);
+  return false;
+}
+
+}  // namespace
 
 // 发送AT命令并获取响应
 String sendATCommand(const char* cmd, unsigned long timeout) {
@@ -107,17 +287,29 @@ void modemInit() {
     blink_short();
   }
   logCaptureLn(String("PDU模式设置完成"));
-  int ceregRetry = 0;
-  while (!waitCEREG() && ceregRetry < 30) {
-    logCaptureLn(String("等待网络注册..."));
-    ceregRetry++;
-    blink_short();
+
+  const String iccid = queryIccid();
+  const String imsi = queryImsi();
+  if (iccid.length() > 0) logCaptureLn(String("已读取SIM ICCID"));
+  else logCaptureLn(String("⚠️ 未读取到SIM ICCID，将使用IMSI兜底"));
+  if (imsi.length() == 0) logCaptureLn(String("⚠️ 未读取到SIM IMSI"));
+
+  logCaptureLn(String("开始自动选网，最长等待120秒..."));
+  if (!sendATandWaitOK("AT+COPS=0", 10000)) {
+    logCaptureLn(String("⚠️ 自动选网命令未确认，继续检查注册状态"));
   }
-  if (ceregRetry < 30) {
+  bool registered = waitForCeregSuccess(AUTO_REGISTER_TIMEOUT_MS);
+  if (registered) {
+    saveCurrentNetwork(iccid, imsi);
+  } else {
+    registered = recoverNetwork(iccid, imsi);
+  }
+
+  if (registered) {
     logCaptureLn(String("网络已注册"));
     modemReady = true;
   } else {
-    logCaptureLn(String("⚠️ 网络注册超时（无SIM卡或信号差），模组功能不可用"));
+    logCaptureLn(String("⚠️ 网络注册失败，模组功能不可用"));
     modemReady = false;
   }
 }
@@ -149,22 +341,8 @@ bool sendATandWaitOK(const char* cmd, unsigned long timeout) {
 // 检测网络注册状态（LTE/4G）
 // CEREG状态: 1=已注册本地, 5=已注册漫游
 bool waitCEREG() {
-  Serial1.println("AT+CEREG?");
-  unsigned long start = millis();
-  String resp = "";
-  while (millis() - start < 2000) {
-    if (Serial1.available()) {
-      char c = Serial1.read();
-      resp += c;
-      if (resp.indexOf("+CEREG:") >= 0) {
-        if (resp.indexOf(",1") >= 0 || resp.indexOf(",5") >= 0) return true;
-        if (resp.indexOf(",0") >= 0 || resp.indexOf(",2") >= 0 || 
-            resp.indexOf(",3") >= 0 || resp.indexOf(",4") >= 0) return false;
-      }
-    }
-    server.handleClient();
-  }
-  return false;
+  const String response = sendATCommand("AT+CEREG?", 2000);
+  return isCeregRegistered(response.c_str());
 }
 
 // 发送短信（PDU模式）

@@ -31,7 +31,7 @@
 - Produces: `uint8_t extractCopsCandidates(const char* response, char candidates[][SIM_NETWORK_PLMN_LENGTH], uint8_t capacity)`。
 - Produces: `bool extractCurrentCops(const char* response, char plmn[SIM_NETWORK_PLMN_LENGTH], uint8_t* act)`。
 
-- [ ] **Step 1: 写入失败的解析测试**
+- [x] **Step 1: 写入失败的解析测试**
 
 创建 `tests/network_recovery_test.cpp`：
 
@@ -58,7 +58,7 @@ int main() {
 }
 ```
 
-- [ ] **Step 2: 确认测试在接口未实现时失败**
+- [x] **Step 2: 确认测试在接口未实现时失败**
 
 运行 `New-Item -ItemType Directory -Force -Path build | Out-Null`，随后运行：
 
@@ -68,7 +68,7 @@ g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\networ
 
 预期：因头文件或函数缺失而编译失败。
 
-- [ ] **Step 3: 写入最小解析实现**
+- [x] **Step 3: 写入最小解析实现**
 
 在 `code/network_recovery.h` 定义：
 
@@ -88,7 +88,7 @@ bool extractCurrentCops(const char* response, char plmn[SIM_NETWORK_PLMN_LENGTH]
 
 在 `code/network_recovery.cpp` 只使用标准 C 字符串函数：`isCeregRegistered` 找到 `+CEREG:` 后只接受状态 1/5；扫描解析按引号内的纯数字 5/6 位 token 去重，不读取 tuple 的第一个状态数；当前运营商解析读取数字 PLMN 和紧随其后的接入技术。
 
-- [ ] **Step 4: 确认解析测试通过**
+- [x] **Step 4: 确认解析测试通过**
 
 ```powershell
 g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\network_recovery.cpp -o build\network_recovery_test.exe
@@ -97,7 +97,7 @@ g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\networ
 
 预期：退出码为 0，且 `46001` 即使在扫描结果中标记为禁止，也会被列为候选。
 
-- [ ] **Step 5: 提交任务**
+- [x] **Step 5: 提交任务**
 
 ```powershell
 git add code/network_recovery.h code/network_recovery.cpp tests/network_recovery_test.cpp
@@ -116,7 +116,7 @@ git commit -m "feat: parse modem network recovery responses"
 - Produces: `int findSimNetworkRecord(const SimNetworkRecord records[], const char* iccid, const char* imsi)`。
 - Produces: `uint8_t selectSimNetworkRecordSlot(const SimNetworkRecord records[])`。
 
-- [ ] **Step 1: 增加失败的缓存规则测试**
+- [x] **Step 1: 增加失败的缓存规则测试**
 
 在现有 `main()` 末尾加入：
 
@@ -139,7 +139,7 @@ for (uint8_t i = 2; i < MAX_SIM_NETWORK_RECORDS; ++i) {
 assert(selectSimNetworkRecordSlot(records) == 0);
 ```
 
-- [ ] **Step 2: 确认缓存测试在接口未实现时失败**
+- [x] **Step 2: 确认缓存测试在接口未实现时失败**
 
 ```powershell
 g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\network_recovery.cpp -o build\network_recovery_test.exe
@@ -147,7 +147,7 @@ g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\networ
 
 预期：因 `SimNetworkRecord` 或缓存函数未定义而失败。
 
-- [ ] **Step 3: 实现固定大小缓存接口**
+- [x] **Step 3: 实现固定大小缓存接口**
 
 在头文件添加：
 
@@ -164,9 +164,9 @@ int findSimNetworkRecord(const SimNetworkRecord records[], const char* iccid, co
 uint8_t selectSimNetworkRecordSlot(const SimNetworkRecord records[]);
 ```
 
-实现要求：以 `iccid[0] == '\0'` 识别空槽；ICCID 非空时只比较 ICCID，ICCID 为空时才比较 IMSI；选槽先返回空槽，满额时返回最小 `lastSuccessTime` 的索引。
+实现要求：仅 ICCID 与 IMSI 均为空时才识别为空槽；ICCID 非空时只比较 ICCID，ICCID 为空时才比较 IMSI；选槽先返回空槽，满额时返回最小 `lastSuccessTime` 的索引。
 
-- [ ] **Step 4: 确认完整主机测试通过**
+- [x] **Step 4: 确认完整主机测试通过**
 
 ```powershell
 g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\network_recovery.cpp -o build\network_recovery_test.exe
@@ -175,7 +175,7 @@ g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\networ
 
 预期：退出码为 0，验证 ICCID 优先、IMSI 兜底、空槽优先与第 21 张卡淘汰最早记录。
 
-- [ ] **Step 5: 提交任务**
+- [x] **Step 5: 提交任务**
 
 ```powershell
 git add code/network_recovery.h code/network_recovery.cpp tests/network_recovery_test.cpp
@@ -194,7 +194,7 @@ git commit -m "feat: add per-sim network cache selection"
 - Produces: `bool waitForCeregSuccess(unsigned long timeoutMs)`，只在时限内得到 `CEREG=1/5` 时返回真。
 - Produces: `bool recoverNetwork(const String& iccid, const String& imsi)`，按 last-good 后扫描候选的顺序恢复。
 
-- [ ] **Step 1: 先写入手工验收表**
+- [x] **Step 1: 先写入手工验收表**
 
 在 `dev_doc/module_details.md` 的网络注册说明中添加：
 
@@ -211,7 +211,7 @@ git commit -m "feat: add per-sim network cache selection"
 
 烧录基线固件并重启模组。预期日志只轮询 `AT+CEREG?`，不会读取 `AT+CCID`、`AT+CIMI`，也不会在注册超时后尝试 `AT+COPS`。保留此日志作为集成前对照。
 
-- [ ] **Step 3: 实现 NVS、身份读取和恢复流程**
+- [x] **Step 3: 实现 NVS、身份读取和恢复流程**
 
 在 `modem.cpp` 包含 `network_recovery.h`，私有实现 NVS 结构与函数：
 
@@ -273,7 +273,7 @@ git commit -m "feat: recover network by per-sim last-good plmn"
 - Consumes: Tasks 1-3 的解析、缓存、NVS 和恢复逻辑。
 - Produces: 主机测试、目标板编译和真实模组验收的证据。
 
-- [ ] **Step 1: 执行主机回归测试**
+- [x] **Step 1: 执行主机回归测试**
 
 ```powershell
 g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\network_recovery.cpp -o build\network_recovery_test.exe
@@ -286,7 +286,7 @@ g++ -std=c++17 -Wall -Wextra -Werror tests\network_recovery_test.cpp code\networ
 
 运行 Task 3 Step 4 的 `arduino-cli compile` 命令。预期退出码为 0，没有新的警告或链接错误。
 
-- [ ] **Step 3: 检查改动范围与空白问题**
+- [x] **Step 3: 检查改动范围与空白问题**
 
 运行 `git diff --check` 和 `git status --short`。
 
