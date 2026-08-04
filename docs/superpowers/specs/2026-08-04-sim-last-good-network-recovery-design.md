@@ -1,50 +1,50 @@
-# Per-SIM Network Recovery Design
+# 按 SIM 卡恢复网络设计
 
-## Goal
+## 目标
 
-Improve modem network recovery without adding dependencies or changing the web UI. The firmware records the last PLMN that successfully registered for each SIM and uses that history before scanning networks.
+在不增加依赖、不改动网页界面的前提下改善模组网络恢复能力。固件记录每张 SIM 卡上次成功注册的 PLMN，并在扫描网络前优先使用该历史记录。
 
-## Scope
+## 范围
 
-- Modify the modem initialization and registration helpers only.
-- Store at most 20 SIM network records in a dedicated NVS namespace.
-- Identify a SIM by ICCID when available; use IMSI only when ICCID cannot be read.
-- Treat only `CEREG` states 1 and 5 as successful registration.
-- Do not use `AT+COPS=?` result status values to decide whether a PLMN may be attempted.
+- 只修改模组初始化和网络注册辅助逻辑。
+- 使用独立 NVS 命名空间，最多保存 20 条 SIM 网络记录。
+- ICCID 可读取时按 ICCID 识别 SIM；只有 ICCID 无法读取时才使用 IMSI。
+- 只有 `CEREG` 状态为 1 或 5 才视为注册成功。
+- 不根据 `AT+COPS=?` 返回的状态字段判断某个 PLMN 是否可以尝试。
 
-## Cache
+## 缓存
 
-Each fixed-size record contains:
+每条固定长度记录包含：
 
 - ICCID
 - IMSI
-- Last successful numeric PLMN
-- Last successful access technology
-- Last successful timestamp
+- 上次成功注册的数字 PLMN
+- 上次成功注册的接入技术
+- 上次成功时间戳
 
-Records are persisted as one fixed-size NVS blob. A new record replaces the entry with the oldest successful timestamp when all 20 slots are occupied. This bounds RAM, NVS use, and code size.
+所有记录作为一个固定长度的 NVS 二进制数据保存。记录满 20 条后写入新卡时，淘汰成功时间最早的一条，以限制 RAM、NVS 和代码体积。
 
-## Registration Flow
+## 注册流程
 
-1. Read `AT+CCID` and `AT+CIMI` once after the modem AT handshake.
-2. Leave operator selection automatic and poll `AT+CEREG?` for up to 120 seconds.
-3. When registration succeeds (`CEREG=1` or `CEREG=5`), query `AT+COPS?`, save the actual registered PLMN and access technology for the current SIM, then complete initialization.
-4. If automatic registration does not succeed, locate the current SIM's last-good record. Use ICCID for lookup when it is available; otherwise use IMSI.
-5. When a record exists, issue `AT+COPS=1,2,"<last-good>",7`, then poll for a successful `CEREG` for up to 45 seconds. On success, update the record and complete initialization.
-6. If no record exists or the last-good attempt fails, run `AT+COPS=?`, extract at most eight distinct numeric PLMNs, and attempt each with `AT+COPS=1,2,"<PLMN>",7`. Poll for successful `CEREG` for up to 45 seconds after each accepted command. Stop at the first successful registration and persist it.
-7. If all candidates fail, issue `AT+COPS=0` to remove the manual selection, leave `modemReady` false, and log the failure.
+1. AT 握手成功后，读取一次 `AT+CCID` 和 `AT+CIMI`。
+2. 保持自动选网，轮询 `AT+CEREG?` 最多 120 秒。
+3. 注册成功（`CEREG=1` 或 `CEREG=5`）时，查询 `AT+COPS?`，保存当前 SIM 实际注册的 PLMN 和接入技术，完成初始化。
+4. 自动注册未成功时，查找当前 SIM 的 last-good 记录。ICCID 可用时只按 ICCID 查找；否则才按 IMSI 查找。
+5. 有记录时，发送 `AT+COPS=1,2,"<last-good>",7`，再轮询 `CEREG` 最多 45 秒。成功后更新记录并完成初始化。
+6. 没有记录或 last-good 尝试失败时，执行 `AT+COPS=?`，提取最多 8 个不重复的数字 PLMN；依次发送 `AT+COPS=1,2,"<PLMN>",7`。每条命令被接受后，最多等待 45 秒的 `CEREG` 成功状态；首次成功即停止并保存结果。
+7. 所有候选均失败时，发送 `AT+COPS=0` 解除手动选网，保持 `modemReady` 为 false，并记录失败日志。
 
-`AT+COPS=?` only discovers candidates. Its availability/forbidden field is ignored because the observed ML307R output marked a PLMN forbidden even though the modem subsequently registered with it.
+`AT+COPS=?` 只用于发现候选 PLMN。它的可用/禁止状态字段不参与筛选，因为实际案例中 ML307R 将一个随后成功注册的 PLMN 标记为了禁止。
 
-## Error Handling
+## 异常处理
 
-- A failed or empty ICCID is not cached as an ICCID identity; IMSI may be used for lookup only in that case.
-- Empty or malformed PLMN values are skipped.
-- An `OK` from a manual `COPS` command is not success by itself; only `CEREG=1/5` is success.
-- The existing UI remains available while all waits run because the AT wait loops continue serving `server.handleClient()`.
+- 读取失败或为空的 ICCID 不作为 ICCID 身份缓存；此时可用 IMSI 查找。
+- 空 PLMN 或格式不正确的 PLMN 一律跳过。
+- 手动 `COPS` 命令返回 `OK` 本身不代表成功；只有 `CEREG=1/5` 才算成功。
+- 现有 AT 等待循环会继续调用 `server.handleClient()`，因此整个恢复期间网页仍可访问。
 
-## Verification
+## 验证
 
-- Add host-testable parsing and cache-selection checks where the project toolchain allows them.
-- Compile the ESP32-C3 sketch with its configured Arduino toolchain.
-- Review the resulting binary size against the current build output and ensure the project remains flashable.
+- 在项目工具链允许的范围内，为解析和缓存选择逻辑添加可在主机执行的测试。
+- 使用项目配置的 Arduino 工具链编译 ESP32-C3 草图。
+- 对比编译输出的二进制大小，确认固件仍可烧录。
