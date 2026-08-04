@@ -42,4 +42,9 @@ int main() {
     records[i].lastSuccessTime = 300 + i;
   }
   assert(selectSimNetworkRecordSlot(records) == 0);
+
+  SimNetworkRecord imsiOnly[MAX_SIM_NETWORK_RECORDS] = {};
+  strcpy(imsiOnly[0].imsi, "901700000000001");
+  assert(findSimNetworkRecord(imsiOnly, "", "901700000000001") == 0);
+  assert(selectSimNetworkRecordSlot(imsiOnly) == 1);
 }
