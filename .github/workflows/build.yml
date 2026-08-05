@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'code/**'
+      - '.github/workflows/build.yml'
   pull_request:
   workflow_dispatch:
 
@@ -23,7 +24,7 @@ jobs:
         arduino-cli config init
         arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
         arduino-cli core update-index
-        arduino-cli core install esp32:esp32
+        arduino-cli core install esp32:esp32@3.3.11
     
     - name: Install dependencies
       run: |
@@ -32,4 +33,4 @@ jobs:
     
     - name: Compile firmware
       run: |
-        arduino-cli compile --fqbn esp32:esp32:esp32c3 ./code
+        arduino-cli compile --fqbn esp32:esp32:esp32c3:PartitionScheme=huge_app ./code
